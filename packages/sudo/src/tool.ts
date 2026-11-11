@@ -284,16 +284,20 @@ export function runSudo(
 	});
 }
 
-/** Timeout for the credential ticket probe (see probeSudoTicket). */
+/** Timeout for the credential probes (see probeSudoTicket / probeSudoPassword). */
 export const AUTH_PROBE_TIMEOUT_MS = 5000;
 
 /**
  * Honest warning surfaced (content + details) on the FIRST ambiguous failure
- * — a non-zero exit without a recognizable failure signature whose
- * credential probe came back non-terminal: the credential is unverified but
- * NOT yet invalidated (a no-reuse sudoers policy makes `sudo -n -v` fail even
- * for a CORRECT password). Kept for one more attempt; a second consecutive
+ * — a non-zero exit without a recognizable failure signature whose BOTH
+ * credential probes came back non-terminal: the credential is unverified but
+ * NOT yet invalidated. Kept for one more attempt; a second consecutive
  * ambiguous failure on the same cached entry clears it and re-prompts.
+ *
+ * Both probes must fail before this warning appears: the ticket probe
+ * (`sudo -n -v`) cannot see a ticket under a no-reuse sudoers policy or a
+ * tty-keyed timestamp with no controlling terminal, and the password probe
+ * (`sudo -S -v`, second stage) covers exactly that case.
  */
 const AMBIGUOUS_CREDENTIAL_WARNING =
 	"the command failed and the cached credential could not be verified (no recognizable authentication failure, and the credential check did not confirm it) — the cached password is kept for one more attempt; if the password itself was wrong it will be cleared and re-prompted after one more such failure.";
@@ -315,6 +319,40 @@ export async function probeSudoTicket(
 	spawner: SudoSpawner,
 ): Promise<boolean> {
 	const run = await runSudo(["sudo", "-n", "-v"], "", timeoutMs, signal, spawner);
+	return !run.timedOut && run.error === undefined && run.exitCode === 0;
+}
+
+/**
+ * Second-stage credential check: validate the CACHED PASSWORD itself by
+ * running `sudo -S -v`, which executes no program and returns 0 iff sudo
+ * accepts the credential supplied on stdin. That is what the ticket probe
+ * cannot answer, and the difference matters on hosts where a ticket is never
+ * reusable:
+ *
+ * - `timestamp_type=tty` (Ubuntu's compile-time default) against a spawn
+ *   with no controlling terminal produces a ticket no later invocation can
+ *   replay, so `sudo -n -v` fails for a CORRECT password.
+ * - `timestamp_timeout=0` / `!timestamp` sudoers policies have the same
+ *   effect by design (the ticket is gone the moment the command ends).
+ *
+ * Without this stage every command-level failure on such a host reads as an
+ * unverifiable credential: a misleading warning on the first, a cache wipe
+ * and a fresh password prompt on the second.
+ *
+ * No `-k`: when a ticket IS reusable this returns immediately and reports an
+ * otherwise-usable credential, and revoking the user's own ticket as a side
+ * effect of a diagnostic would be rude. The password reaches sudo over stdin
+ * only, never argv or env (ADR 0010), and a failed validation is NOT treated
+ * as evidence of a wrong password here — only success is terminal, so the
+ * two-strike rule keeps its existing margin.
+ */
+export async function probeSudoPassword(
+	password: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	spawner: SudoSpawner,
+): Promise<boolean> {
+	const run = await runSudo(["sudo", "-S", "-v", "-p", ""], password, timeoutMs, signal, spawner);
 	return !run.timedOut && run.error === undefined && run.exitCode === 0;
 }
 
@@ -353,8 +391,8 @@ const SUDO_EXEC_DESCRIPTION = `Run a command with elevated privileges using sudo
 
 /**
  * Create the sudo_exec tool definition. Options are a test seam: pass a
- * custom spawner to exercise execution paths without real processes, and a
- * custom authProbe to control the ticket probe without spawning `sudo -n`.
+ * custom spawner to exercise execution paths without real processes, and
+ * custom probes to control the credential checks without spawning `sudo -v`.
  */
 export function createSudoExecTool(options: {
 	spawner?: SudoSpawner;
@@ -367,12 +405,26 @@ export function createSudoExecTool(options: {
 	 * password-free credential validation that executes no program)
 	 * is safe to run after any command-level failure. Default: a
 	 * spawner-based `sudo -n -v` ticket probe (probeSudoTicket). It
-	 * never receives the password, by design.
+	 * never receives the password, by design — the second stage below
+	 * is what asks the credential itself.
 	 */
 	authProbe?: (timeoutMs: number, signal: AbortSignal | undefined) => Promise<boolean>;
+	/**
+	 * Second-stage credential check, run only when the ticket probe is
+	 * non-terminal: validate the CACHED PASSWORD with `sudo -S -v` (no
+	 * program executed, password over stdin). This is the check that
+	 * separates "the password is bad" from "this host never has a
+	 * reusable ticket" (tty-keyed timestamps without a controlling
+	 * terminal, `timestamp_timeout=0`, no-reuse sudoers). Default:
+	 * probeSudoPassword.
+	 */
+	passwordProbe?: (password: string, timeoutMs: number, signal: AbortSignal | undefined) => Promise<boolean>;
 } = {}) {
 	const spawner = options.spawner ?? defaultSpawner;
 	const authProbe = options.authProbe ?? ((timeoutMs: number, signal: AbortSignal | undefined) => probeSudoTicket(timeoutMs, signal, spawner));
+	const passwordProbe =
+		options.passwordProbe ??
+		((password: string, timeoutMs: number, signal: AbortSignal | undefined) => probeSudoPassword(password, timeoutMs, signal, spawner));
 
 	const fail = (text: string, details: SudoExecDetails) => ({
 		content: [{ type: "text" as const, text }],
@@ -526,21 +578,32 @@ export function createSudoExecTool(options: {
 			// non-zero WITHOUT the English "incorrect password" fast-path
 			// signature — a wrong password is indistinguishable from a
 			// localized message (or a genuine command failure) on the
-			// signature path alone. Probe the credential with `sudo -n -v`
-			// (validates the ticket, executes no program, no password):
-			// the probe succeeding means the credential is fine and the
-			// command itself failed → normal result; the probe failing means
-			// the credential is unverified. Two-strike rule on the AMBIGUOUS
-			// path only: a no-reuse sudoers policy makes `sudo -n -v` fail
-			// even for a CORRECT password (no reusable ticket), so the first
-			// such failure keeps the credential with a visible one-more-attempt
+			// signature path alone. Two credential probes, cheapest first:
+			//
+			//   1. `sudo -n -v` (probeSudoTicket) validates the TICKET,
+			//      executes no program, needs no password.
+			//   2. `sudo -S -v` (probeSudoPassword) validates the CACHED
+			//      PASSWORD, executes no program, password over stdin only.
+			//      Runs only when stage 1 is non-terminal, because stage 1
+			//      failing is exactly the case stage 2 answers: a no-reuse
+			//      sudoers policy, or `timestamp_type=tty` against a spawn
+			//      with no controlling terminal (Ubuntu's default), leaves
+			//      no replayable ticket EVEN FOR A CORRECT PASSWORD. With
+			//      stage 1 alone, every command-level failure on such a host
+			//      reads as an unverifiable credential.
+			//
+			// Either probe succeeding means the credential is fine and the
+			// command itself failed → normal result. Two-strike rule on the
+			// AMBIGUOUS path only (both probes non-terminal): the first such
+			// failure keeps the credential with a visible one-more-attempt
 			// warning; the SECOND consecutive ambiguous failure on the same
 			// cached entry clears it and re-prompts. The English fast path
 			// (above) still clears immediately, and success / run / /timeout
 			// /abort outcomes reset (or leave untouched) the streak.
 			// NOT gated on the prompt text — localized sudo emits a prompt in
-			// the user's language, and after ANY command-level failure the
-			// probe is safe (valid ticket → keep, no ticket → re-prompt).
+			// the user's language, and after ANY command-level failure both
+			// probes are safe (the password one validates only, and a wrong
+			// password still costs nothing beyond a failed `sudo -v`).
 			// Control/kill exits are excluded: -1 process error (handled
 			// above), 124 timeout (handled above), 130 abort, 137 SIGKILL —
 			// those aren't auth evidence and must not count as strikes.
@@ -551,12 +614,26 @@ export function createSudoExecTool(options: {
 				} catch {
 					ticketValid = false; // probe transport error → non-terminal probe
 				}
-				if (ticketValid) {
-					// Ticket terminal: the credential verified — drop any carried
+
+				// Stage 2. Only success is terminal: a failed `sudo -v` keeps the
+				// existing margin (no immediate clear on a single ambiguous
+				// failure), so a transport hiccup or an over-restrictive sudoers
+				// cannot throw away a good credential.
+				let passwordValid = false;
+				if (!ticketValid) {
+					try {
+						passwordValid = await passwordProbe(credential.password, AUTH_PROBE_TIMEOUT_MS, signal);
+					} catch {
+						passwordValid = false; // probe transport error → non-terminal probe
+					}
+				}
+
+				if (ticketValid || passwordValid) {
+					// Terminal: the credential verified — drop any carried
 					// streak; this is a straightforward command failure.
 					credentialCache.resetFailStreak();
 				} else {
-					// Non-terminal probe: unverifiable credential — count a strike
+					// Non-terminal probes: unverifiable credential — count a strike
 					// on the CURRENT cached entry.
 					credentialCache.bumpFailStreak();
 					if ((credentialCache.get()?.failStreak ?? 0) >= 2) {
