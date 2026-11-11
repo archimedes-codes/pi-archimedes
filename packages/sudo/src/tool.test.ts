@@ -32,7 +32,7 @@ vi.mock("@pi-archimedes/core/bridge", () => ({
 	getBridge: () => bridgeState,
 }));
 
-import { buildSudoArgv, createSudoExecTool, probeSudoTicket, scrubSecret } from "./tool.js";
+import { buildSudoArgv, createSudoExecTool, probeSudoPassword, probeSudoTicket, scrubSecret } from "./tool.js";
 import type { SudoChild, SudoSpawner } from "./tool.js";
 import { credentialCache } from "./cache.js";
 
@@ -350,8 +350,8 @@ describe("sudo_exec tool", () => {
 	describe("execution", () => {
 		it("runs the command and returns stdout with scrubbed details on success", async () => {
 			const { spawner, last } = makeFakeSpawner({ stdout: "hello\n", stderr: "[sudo] password for daniel: ", code: 0 });
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("cachedpw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -402,8 +402,8 @@ describe("sudo_exec tool", () => {
 
 		it("reports non-zero exit codes as errors", async () => {
 			const { spawner } = makeFakeSpawner({ stderr: "E: not found", code: 100 });
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const spies = spiesNoPrompt();
 			const ctx = tuiCtxWithSpies(true, spies);
@@ -456,8 +456,8 @@ describe("sudo_exec tool", () => {
 			// No automatic exit: only abort's kill ever settles the child.
 			const { spawner, last } = makeFakeSpawner({ stderr: "starting…", code: null, exitOn: "kill" });
 			const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true); // group SIGKILL delivered, no exit echoed here — the settle-guard is the point
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 			const controller = new AbortController();
@@ -568,8 +568,8 @@ describe("sudo_exec tool", () => {
 			// never produced a process) → the review's crash/hang finding.
 			credentialCache.set("pw", 60_000);
 			const err = Object.assign(new Error("spawn sudo ENOENT"), { code: "ENOENT" });
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: () => errorChild(err), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: () => errorChild(err), authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const result = await run(tool, ctx, { command: "apt update", reason: "maintain" });
@@ -700,8 +700,8 @@ describe("sudo_exec tool", () => {
 			// false-fail this perfectly legitimate fast-exit success.
 			credentialCache.set("nopw", 60_000);
 			const { child, emitStdinError, exit } = streamingChild();
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: () => child, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: () => child, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const promise = run(tool, ctx, { command: "hostname", reason: "test" });
@@ -720,8 +720,8 @@ describe("sudo_exec tool", () => {
 		it("EPIPE on stdin followed by exit(1) settles as a normal command failure (exit 1), no crash", async () => {
 			credentialCache.set("pw", 60_000);
 			const { child, emitStdinError, exit } = streamingChild();
-			const { authProbe, calls } = probeSpy(true); // gate probes; valid ticket → command failure, not auth
-			const tool = createSudoExecTool({ spawner: () => child, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true); // gate probes; valid ticket → command failure, not auth
+			const tool = createSudoExecTool({ spawner: () => child, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const promise = run(tool, ctx, { command: "systemctl stop dnsmasq", reason: "test" });
@@ -741,8 +741,8 @@ describe("sudo_exec tool", () => {
 		it("anomalous stdin error while the child is still running (no exit) settles a clean transport failure — cache RETAINED, no probe", async () => {
 			credentialCache.set("pw", 60_000);
 			const { child, emitStdinError } = streamingChild();
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: () => child, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: () => child, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const promise = run(tool, ctx, { command: "apt update", reason: "maintain" });
@@ -768,8 +768,8 @@ describe("sudo_exec tool", () => {
 		it("anomalous stdin error AFTER exit(0) already settled success is ignored — result stays success (no double-settle)", async () => {
 			credentialCache.set("pw", 60_000);
 			const { child, emitStdinError, exit } = streamingChild();
-			const { authProbe } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: () => child, authProbe });
+			const { authProbe, passwordProbe } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: () => child, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const promise = run(tool, ctx, { command: "true", reason: "test" });
@@ -842,6 +842,67 @@ describe("sudo_exec tool", () => {
 		});
 	});
 
+	describe("probeSudoPassword (password-based second-stage credential verification)", () => {
+		it("validates with ['sudo','-S','-v','-p',''] and the password on STDIN — no program, never argv", async () => {
+			const calls: Array<{ command: string; args: string[] }> = [];
+			const { spawner, last } = makeFakeSpawner({ stderr: "", code: 0 });
+			const capturing: SudoSpawner = (command, args) => {
+				calls.push({ command, args });
+				return spawner(command, args);
+			};
+
+			const valid = await probeSudoPassword("hunter2", 5000, undefined, capturing);
+
+			expect(calls).toHaveLength(1);
+			expect(calls[0]).toEqual({ command: "sudo", args: ["-S", "-v", "-p", ""] });
+			expect(calls[0]!.args).not.toContain("hunter2"); // password never in argv
+			expect(last.child.stdin.written).toEqual(["hunter2\n"]); // …only on stdin
+			expect(valid).toBe(true);
+		});
+
+		it("returns false when sudo rejects the credential (non-zero exit)", async () => {
+			const calls: Array<{ command: string; args: string[] }> = [];
+			const { spawner } = makeFakeSpawner({ stderr: "sudo: 1 incorrect password attempt\n", code: 1 });
+			const capturing: SudoSpawner = (command, args) => {
+				calls.push({ command, args });
+				return spawner(command, args);
+			};
+
+			const valid = await probeSudoPassword("wrong", 5000, undefined, capturing);
+
+			expect(calls[0]).toEqual({ command: "sudo", args: ["-S", "-v", "-p", ""] });
+			expect(valid).toBe(false);
+		});
+
+		it("is what the tool runs by DEFAULT after a non-terminal ticket probe (real wiring, fake processes)", async () => {
+			const calls: Array<{ command: string; args: string[] }> = [];
+			const steps = stepSpawner([
+				{ stderr: NON_ENGLISH_STDERR, code: 1 }, // the command run: ambiguous failure
+				{ stderr: "sudo: interactive authentication is required\n", code: 1 }, // stage 1: no reusable ticket
+				{ stderr: "", code: 0 }, // stage 2: the password validates
+			]);
+			const recording: SudoSpawner = (command, args) => {
+				calls.push({ command, args });
+				return steps(command, args);
+			};
+			const tool = createSudoExecTool({ spawner: recording });
+			credentialCache.set("goodpw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const result = await run(tool, ctx, { command: "systemctl restart dnsmasq", reason: "flip" });
+
+			expect(calls.map((c) => c.args)).toEqual([
+				["-S", "systemctl", "restart", "dnsmasq"],
+				["-n", "-v"],
+				["-S", "-v", "-p", ""],
+			]);
+			expect(result.isError).toBe(true);
+			const text = (result.content[0] as { text: string }).text;
+			expect(text).not.toMatch(/one more attempt/i);
+			expect(credentialCache.get()?.failStreak).toBe(0);
+		});
+	});
+
 	describe("locale-immune auth-failure invalidation (credential ticket probe)", () => {
 		// The probe gate no longer requires the English prompt: it fires on any
 		// command-level failure (normal non-zero exit) whose stderr did not
@@ -861,8 +922,8 @@ describe("sudo_exec tool", () => {
 		}
 
 		it("keeps the cache on the FIRST ambiguous failure with a non-terminal probe (strike 1 of two) — with the one-more-attempt warning", async () => {
-			const { authProbe, calls } = probeSpy(false);
-			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
 			credentialCache.set("badpw-de", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -879,8 +940,8 @@ describe("sudo_exec tool", () => {
 		});
 
 		it("keeps the cache (and resets a carried streak) when the probe succeeds — valid credential ticket means the command itself failed, NOT the auth", async () => {
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
 			credentialCache.set("goodpw", 60_000);
 			credentialCache.bumpFailStreak(); // carried streak from an earlier ambiguous failure
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
@@ -899,9 +960,76 @@ describe("sudo_exec tool", () => {
 			expect(calls()).toBe(1);
 		});
 
+		it("verifies the cached PASSWORD when the ticket probe is non-terminal — a correct password is a command failure, not an unverifiable credential", async () => {
+			const { authProbe, passwordProbe, calls, passwordCalls } = probeSpy(false, false, true);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
+			credentialCache.set("goodpw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const result = await run(tool, ctx, { command: "sync; echo 3 > /proc/sys/vm/drop_caches", reason: "cache test" });
+
+			// ticket probe non-terminal, password probe terminal → plain command failure
+			expect(result.isError).toBe(true);
+			const text = (result.content[0] as { text: string }).text;
+			expect(text).not.toMatch(/one more attempt/i);
+			expect(text).not.toMatch(/could not be verified/i);
+			expect((result.details as { error?: string }).error).toMatch(/command failed with exit code 1/i);
+			// the credential verified — nothing thrown away, no strike carried
+			expect(credentialCache.get()?.password).toBe("goodpw");
+			expect(credentialCache.get()?.failStreak).toBe(0);
+			expect(calls()).toBe(1);
+			expect(passwordCalls()).toBe(1); // stage 2 ran exactly once
+		});
+
+		it("does NOT run the password probe when the ticket probe is already terminal (stage 1 stays the cheap check)", async () => {
+			const { authProbe, passwordProbe, calls, passwordCalls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
+			credentialCache.set("goodpw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const result = await run(tool, ctx, { command: "systemctl restart dnsmasq", reason: "flip" });
+
+			expect(result.isError).toBe(true);
+			expect(calls()).toBe(1);
+			expect(passwordCalls()).toBe(0); // no password spent on a validated ticket
+		});
+
+		it("counts a strike only when BOTH probes are non-terminal — the warning names the credential, not the command", async () => {
+			const { authProbe, passwordProbe, calls, passwordCalls } = probeSpy(false, false, false);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
+			credentialCache.set("pw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const result = await run(tool, ctx, { command: "wake lock", reason: "test" });
+
+			expect(result.isError).toBe(true);
+			expect((result.content[0] as { text: string }).text).toMatch(/one more attempt/i);
+			expect(credentialCache.get()?.failStreak).toBe(1);
+			expect(calls()).toBe(1);
+			expect(passwordCalls()).toBe(1);
+		});
+
+		it("treats a stage-2 transport error as non-terminal — strike 1, never a clear", async () => {
+			const { authProbe, calls } = probeSpy(false);
+			const passwordProbe = (): Promise<boolean> => Promise.reject(new Error("probe transport error"));
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
+			credentialCache.set("pw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const result = await run(tool, ctx, { command: "wake lock", reason: "test" });
+
+			expect(result.isError).toBe(true);
+			const text = (result.content[0] as { text: string }).text;
+			expect(text).not.toMatch(/authentication failed/i);
+			expect(text).toMatch(/one more attempt/i);
+			expect(credentialCache.get()?.password).toBe("pw");
+			expect(credentialCache.get()?.failStreak).toBe(1);
+			expect(calls()).toBe(1);
+		});
+
 		it("keeps the cache on the first ambiguous failure when the probe itself errors — strike 1, not an immediate clear", async () => {
-			const { authProbe, calls } = probeSpy(false, true);
-			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false, true);
+			const tool = createSudoExecTool({ spawner: ambiguousRunSpawner(), authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -922,8 +1050,8 @@ describe("sudo_exec tool", () => {
 				stderr: "[sudo] password for daniel: \nsorry, try again.\n3 incorrect password attempts\n",
 				code: 1,
 			});
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("badpw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -938,8 +1066,8 @@ describe("sudo_exec tool", () => {
 
 		it("never probes a timed-out run, even when the prompt was seen (124/137 branches stay untouched)", async () => {
 			const { spawner } = makeFakeSpawner({ stderr: "[sudo] password for daniel: ", code: null, exitOn: "kill" });
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -951,8 +1079,8 @@ describe("sudo_exec tool", () => {
 		});
 
 		it("verifies the probe still runs on a localized-sudo failure with NO English prompt text at all (promptSeen=false — the key regression) — and keeps the cache on strike 1", async () => {
-			const { authProbe, calls } = probeSpy(false);
-			const tool = createSudoExecTool({ spawner: localizedOnlyRunSpawner(), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false);
+			const tool = createSudoExecTool({ spawner: localizedOnlyRunSpawner(), authProbe, passwordProbe });
 			credentialCache.set("badpw-de", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -968,8 +1096,8 @@ describe("sudo_exec tool", () => {
 		});
 
 		it("keeps the cache on a no-English-prompt failure when the ticket is valid (probe disambiguates auth from command failure)", async () => {
-			const { authProbe, calls } = probeSpy(true);
-			const tool = createSudoExecTool({ spawner: localizedOnlyRunSpawner(), authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner: localizedOnlyRunSpawner(), authProbe, passwordProbe });
 			credentialCache.set("goodpw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -989,8 +1117,8 @@ describe("sudo_exec tool", () => {
 				{ stderr: NON_ENGLISH_STDERR, code: 1 }, // strike 1
 				{ stderr: NON_ENGLISH_STDERR, code: 1 }, // strike 2
 			]);
-			const { authProbe, calls } = probeSpy(false);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("badpw-de", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -1017,8 +1145,8 @@ describe("sudo_exec tool", () => {
 				{ stdout: "ok\n", code: 0 },           // success → reset
 				{ stderr: NON_ENGLISH_STDERR, code: 1 }, // ambiguous again → must be strike 1, not a clear
 			]);
-			const { authProbe, calls } = probeSpy(false);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -1043,8 +1171,8 @@ describe("sudo_exec tool", () => {
 				{ stderr: NON_ENGLISH_STDERR, code: 1 },                                               // ambiguous → streak 1
 				{ stderr: "[sudo] password for daniel: \nsorry, try again.\n3 incorrect password attempts\n", code: 1 }, // fast path
 			]);
-			const { authProbe, calls } = probeSpy(false); // non-terminal probe → strike 1, not a ticket-valid reset
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe, calls } = probeSpy(false); // non-terminal probe → strike 1, not a ticket-valid reset
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("badpw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -1067,8 +1195,8 @@ describe("sudo_exec tool", () => {
 				if (i === 2) return erroredChild(); // transport failure says nothing about the credential
 				return ambient(command, args);
 			};
-			const { authProbe } = probeSpy(false);
-			const tool = createSudoExecTool({ spawner, authProbe });
+			const { authProbe, passwordProbe } = probeSpy(false);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
 			credentialCache.set("pw", 60_000);
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
@@ -1342,9 +1470,9 @@ describe("sudo_exec tool", () => {
 				if (killAttempts === 1) throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
 				return true;
 			});
-			const { authProbe, calls } = probeSpy(false); // non-terminal probe — any bad entry would bump the streak, VIEWABLE
+			const { authProbe, passwordProbe, calls } = probeSpy(false); // non-terminal probe — any bad entry would bump the streak, VIEWABLE
 			const racing = racingChild();
-			const tool = createSudoExecTool({ spawner: racing.spawner, authProbe });
+			const tool = createSudoExecTool({ spawner: racing.spawner, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 			const controller = new AbortController();
 
@@ -1378,10 +1506,10 @@ describe("sudo_exec tool", () => {
 				if (killAttempts % 2 === 1) throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
 				return true; // every odd attempt opens the 50ms retry window; the even one confirms
 			});
-			const { authProbe, calls } = probeSpy(false);
+			const { authProbe, passwordProbe, calls } = probeSpy(false);
 			const races = [racingChild(), racingChild()]; // fresh child per run
 			let next = 0;
-			const tool = createSudoExecTool({ spawner: () => races[next++]!.child, authProbe });
+			const tool = createSudoExecTool({ spawner: () => races[next++]!.child, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const abortRun = async (reason: string) => {
@@ -1407,9 +1535,9 @@ describe("sudo_exec tool", () => {
 
 		it("a normal (non-aborted) 1–123 exit still probes and bumps exactly as before — the swallow only applies post-abort", async () => {
 			credentialCache.set("pw", 60_000);
-			const { authProbe, calls } = probeSpy(false); // non-terminal probe → strike 1
+			const { authProbe, passwordProbe, calls } = probeSpy(false); // non-terminal probe → strike 1
 			const racing = racingChild();
-			const tool = createSudoExecTool({ spawner: racing.spawner, authProbe });
+			const tool = createSudoExecTool({ spawner: racing.spawner, authProbe, passwordProbe });
 			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
 
 			const promise = run(tool, ctx, { command: "apt update", reason: "maintain" });
@@ -1436,14 +1564,27 @@ function spiesNoPrompt() {
 	};
 }
 
-function probeSpy(ok: boolean, throws = false) {
+/**
+ * Both credential probes, controllable per test.
+ *
+ * `ok`/`throws` drive stage 1 (the `sudo -n -v` ticket probe). `passwordOk`
+ * drives stage 2 (the `sudo -S -v` password probe), which the tool runs ONLY
+ * when stage 1 is non-terminal — the default there is non-terminal (false),
+ * which keeps the pre-existing two-strike tests meaning what they say.
+ */
+function probeSpy(ok: boolean, throws = false, passwordOk = false) {
 	let calls = 0;
+	let pwCalls = 0;
 	const authProbe: (timeoutMs: number, signal: AbortSignal | undefined) => Promise<boolean> = () => {
 		calls += 1;
 		if (throws) return Promise.reject(new Error("probe transport error"));
 		return Promise.resolve(ok);
 	};
-	return { authProbe, calls: () => calls };
+	const passwordProbe: (password: string, timeoutMs: number, signal: AbortSignal | undefined) => Promise<boolean> = () => {
+		pwCalls += 1;
+		return Promise.resolve(passwordOk);
+	};
+	return { authProbe, passwordProbe, calls: () => calls, passwordCalls: () => pwCalls };
 }
 
 function tuiCtxWithSpies(confirmAnswer: boolean, spies: { confirmCalls: Array<{ title: string; message: string }>; customCalls: unknown[] }): ExtensionContext {

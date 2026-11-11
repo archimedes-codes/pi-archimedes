@@ -73,10 +73,16 @@ The guard is a **heuristic with accepted residual bypasses** documented in the [
 
 ### Credential handling when sudo retains no verifiable ticket
 
-On sudoers policies that retain no reusable credential ticket (e.g. `timestamp_timeout=0` with strict `Defaults`), an authenticated but failed command is indistinguishable from an authentication failure unless the ticket can be verified with `sudo -n -v`.
+An authenticated but failed command is indistinguishable from an authentication failure unless the credential can be verified independently, so the tool runs two probes after a command-level failure:
+
+1. **`sudo -n -v` (ticket probe)** — validates sudo's ticket, executes no program, needs no password.
+2. **`sudo -S -v` (password probe)** — validates the **cached password** via stdin, executes no program. It runs **only when the ticket probe is non-terminal**, which is exactly the case it answers: hosts where no ticket is ever replayable — `timestamp_timeout=0` / no-reuse `Defaults`, or a tty-keyed timestamp (`timestamp_type=tty`, Ubuntu's default) against a spawn with no controlling terminal. On those hosts the ticket probe fails **even for a correct password**, so without stage 2 every command-level failure would read as an unverifiable credential.
+
+Then:
 
 - A **recognized wrong password** (sudo's `incorrect password` output alongside its prompt) clears the credential **immediately**, on that failure.
-- The **two-strike rule** applies to **ambiguous** failures where the ticket probe cannot verify the credential: the first strike keeps the cached password (with a visible one-more-attempt warning), the second consecutive strike clears it and re-prompts. Success resets the streak, and transport failures don't count as strikes.
+- **Either probe succeeding** means the credential is fine and the command itself failed: the run is reported as an ordinary non-zero exit and any carried strike is reset.
+- The **two-strike rule** applies to **ambiguous** failures, i.e. both probes non-terminal: the first strike keeps the cached password (with a visible one-more-attempt warning), the second consecutive strike clears it and re-prompts. Success resets the streak, and transport failures don't count as strikes. A failed password probe is never treated as proof of a wrong password — only success is terminal — so a transient hiccup cannot discard a good credential.
 
 ## Part of the suite
 
