@@ -56,29 +56,19 @@ export {
   type ToolStyle,
 } from "./config.js";
 
-// Module-level state for session lifecycle
-let uiRef: ListingRef | undefined;
-let uiCtx: ExtensionContext | undefined;
-
-let spinFlag = false;
-let spinInterval: ReturnType<typeof setInterval> | undefined;
-
-/**
- * Which Archimedes tool rows the current session asks for, refreshed at every
- * `session_start` and read by the renderer resolver. The resolver itself is
- * registered once per extension load — pi keeps a list of resolvers per
- * extension, so registering it from `session_start` would stack a duplicate on
- * every `/reload` — which means the settings have to be read here rather than
- * inside the resolver: `renderCall`/`renderResult` run on every frame.
- */
-let styledTools = { bash: false, codemode: false };
-
-function clearSpinInterval(): void {
-  if (spinInterval) {
-    clearInterval(spinInterval);
-    spinInterval = undefined;
-  }
-}
+// No module-scope session state (#156).
+//
+// pi caches an extension MODULE per process and re-invokes its factory with a
+// fresh `pi` per session, so anything kept at module scope is shared by every
+// session in the process — including a SUBORDINATE in-process session (a
+// subagent child, bound with no uiContext, so `ctx.hasUI` is false). When that
+// child is reaped its `session_shutdown` runs against this same module, and any
+// ref it could write or clear was the LIVE main session's: the border spinner's
+// interval cleared, `spinFlag` flipped off so the main session's own teardown
+// stopped handing pi's working row back, and the splash's timers stopped through
+// `stopStartupListing()`. Every one of those refs therefore lives in the
+// `registerUI` closure below — one set per registration — which is what makes
+// the child's teardown able to reach only the child's own state.
 
 /**
  * Draw the bash row through pi's renderer resolution (ADR 0029).
@@ -91,7 +81,10 @@ function clearSpinInterval(): void {
  * `createBashToolDefinition()` with our renderers bolted on — which also means
  * anything pi later adds to that tool cannot be silently dropped by us.
  */
-function registerToolRenderers(pi: ExtensionAPI): void {
+function registerToolRenderers(
+  pi: ExtensionAPI,
+  styled: () => { bash: boolean; codemode: boolean },
+): void {
   // Capability check, not a version wish: on a host without the API there is
   // nothing to resolve through, and pi's own rows stand in.
   if (typeof pi.registerToolRenderer !== "function") return;
@@ -100,10 +93,18 @@ function registerToolRenderers(pi: ExtensionAPI): void {
     // `next()` is spread first so that whatever the built-in definition
     // declares besides the two renderers — `renderShell` is the one that matters
     // today — survives resolution instead of being silently dropped by us.
+    //
+    // `styled()` is read HERE rather than captured at registration: the resolver
+    // is registered once per `registerUI` (pi keeps a list per extension, so
+    // registering it from `session_start` would stack a duplicate on every
+    // `/reload`), while the settings are deliberately re-read every
+    // `session_start` so a change made between sessions takes effect. A getter,
+    // not a value, is what keeps those two lifetimes compatible.
+    const styledNow = styled();
     const ours =
-      toolName === "bash" && styledTools.bash
+      toolName === "bash" && styledNow.bash
         ? { renderCall: renderBashCall, renderResult: renderBashResult }
-        : toolName === "codemode" && styledTools.codemode
+        : toolName === "codemode" && styledNow.codemode
           ? { renderCall: renderCodemodeCall, renderResult: renderCodemodeResult }
           : undefined;
     return ours ? { ...next(), ...ours } : next();
@@ -119,8 +120,51 @@ export function registerUI(pi: ExtensionAPI): void {
   // would make /plugins report an enabled package that did nothing.
   reportPiSupport("ui", "1.2.0");
 
+  // ── This registration's session state (#156) ────────────────────────────────
+  //
+  // Everything a single session owns, held per `registerUI` call rather than at
+  // module scope — see the note above `registerToolRenderers`.
+
+  /** The splash ref this session installed (`undefined` = no splash on screen). */
+  let uiRef: ListingRef | undefined;
+  /** The ctx of the last `session_start` THIS registration handled. */
+  let uiCtx: ExtensionContext | undefined;
+  /** Whether this session hid pi's working row for the border spinner. */
+  let spinFlag = false;
+  /** The border spinner's interval, handed over by `HephaestusEditor`. */
+  let spinInterval: ReturnType<typeof setInterval> | undefined;
+  /**
+   * Which Archimedes tool rows this session asks for, refreshed at every
+   * `session_start` and read by the renderer resolver through the getter below
+   * (ADR 0029).
+   */
+  let styledTools = { bash: false, codemode: false };
+  /**
+   * Whether THIS registration put the splash in pi's header slot and has not
+   * handed it back — the ownership flag that scopes `stopStartupListing()`.
+   *
+   * `stopStartupListing()` stops the frame/reveal timers in
+   * `./startup/index.js`, and those two stay module-scope there on purpose (see
+   * the note in that file: one splash is on screen at a time, and pi disposes
+   * the header it is replacing before it builds the next, so a module pair of
+   * timers cannot leak a second animation). What must not be module-scope is the
+   * *decision to ask that pair to stop*: on a shutdown that does not own the
+   * splash — a subagent child reaped while the main session's logo is still
+   * animating — calling it freezes the parent's animation mid-reveal. So the
+   * call is gated on having installed the header ourselves, which is also why
+   * `startup/index.ts` needed no change at all.
+   */
+  let weInstalledTheSplash = false;
+
+  function clearSpinInterval(): void {
+    if (spinInterval) {
+      clearInterval(spinInterval);
+      spinInterval = undefined;
+    }
+  }
+
   // Registered once per extension load, before any session exists (ADR 0029).
-  registerToolRenderers(pi);
+  registerToolRenderers(pi, () => styledTools);
 
   // One-time migration of any legacy core config to UI config
   migrateCoreToUIConfig();
@@ -137,6 +181,11 @@ export function registerUI(pi: ExtensionAPI): void {
 
   // session_shutdown handler (top-level to prevent accumulation on /reload)
   pi.on("session_shutdown", (_event, ctx) => {
+    // `uiCtx` is the closure ref of THIS registration, so the fallback can only
+    // ever find the ctx this instance last saw — a foreign session's shutdown
+    // cannot reach another instance's ctx through it (#156). The shape is kept
+    // rather than reduced to `ctx`: pi hands a ctx built off its own runner, and
+    // asserting its defaults verbatim is exactly what ADR 0031 refuses to do.
     const targetCtx = ctx?.hasUI ? ctx : uiCtx;
     if (targetCtx?.hasUI) {
       // Give back what this session took: the row we hid for the border spinner,
@@ -155,10 +204,17 @@ export function registerUI(pi: ExtensionAPI): void {
     spinFlag = false;
 
     // The splash: stop the frame/reveal timers, then freeze the ref so a late
-    // render of a header still on screen cannot restart the animation. Nothing
-    // else to undo — the startup listing interception and the console.log patch
-    // this used to un-install are gone (pi 1.x alignment, Task 8).
-    stopStartupListing();
+    // render of a header still on screen cannot restart the animation. Only if
+    // THIS session installed the header and has not handed it back — the timers
+    // `stopStartupListing()` stops are module state in `startup/index.ts`, so an
+    // unguarded call here let a subagent child's shutdown freeze the live main
+    // session's logo mid-reveal (#156). Nothing else to undo — the startup
+    // listing interception and the console.log patch this used to un-install are
+    // gone (pi 1.x alignment, Task 8).
+    if (weInstalledTheSplash) {
+      stopStartupListing();
+      weInstalledTheSplash = false;
+    }
     if (uiRef) {
       uiRef.settled = true;
     }
@@ -234,6 +290,9 @@ export function registerUI(pi: ExtensionAPI): void {
       if (!startupSplash) {
         ctx.ui.setHeader(undefined);
         uiRef = undefined;
+        // The slot is pi's again (or was never ours) — this session owns no
+        // splash, so its teardown must not stop the animation module's timers.
+        weInstalledTheSplash = false;
       } else if (quietStartup === true) {
         // pi's own header is an empty component in this mode. Handing ours back
         // is what keeps that silence: a splash left installed from an earlier
@@ -241,6 +300,7 @@ export function registerUI(pi: ExtensionAPI): void {
         // otherwise animate over it.
         ctx.ui.setHeader(undefined);
         uiRef = undefined;
+        weInstalledTheSplash = false;
       } else {
         // What the splash reveals after the logo. The version row belongs to
         // the header itself; the model scope is a startup *detail*, so it
@@ -293,6 +353,10 @@ export function registerUI(pi: ExtensionAPI): void {
             // component, whose timers then run until they settle themselves.
             dispose(): void {
               stopStartupListing();
+              // We no longer own the animation: pi is replacing (or removing)
+              // the header, so the timers are already stopped and a later
+              // `session_shutdown` has nothing left to stop here.
+              weInstalledTheSplash = false;
             },
           };
           patchStartupListing(tui, ref);
@@ -300,6 +364,10 @@ export function registerUI(pi: ExtensionAPI): void {
           return comp;
         };
         ctx.ui.setHeader(headerFactory);
+        // From here on this registration owns the splash: it is the one that put
+        // the animation in pi's header slot, so it is the only one allowed to
+        // stop it on the way out (`session_shutdown`, or `dispose()` above).
+        weInstalledTheSplash = true;
       }
 
       clearSpinInterval();
