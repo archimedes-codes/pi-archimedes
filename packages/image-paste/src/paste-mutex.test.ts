@@ -1,9 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The mutex lives in the shortcut handler in `index.ts` and the readers live in
-// `clipboard.ts`, so this file deliberately mocks *neither*: the real dispatch
-// runs against a faked clipboard helper and a faked command runner, which is the
-// only way to ask the question that matters to a user — does `ctrl+v` come back?
+// The mutex is the `pasting` flag in `registerImagePaste` (per session since
+// #156) and the readers live in `clipboard.ts`, so this file deliberately mocks
+// *neither*: the real dispatch runs against a faked clipboard helper and a faked
+// command runner, which is the only way to ask the question that matters to a
+// user — does `ctrl+v` come back?
 const { mockGetNativeClipboard, mockSpawnSync } = vi.hoisted(() => ({
   mockGetNativeClipboard: vi.fn(),
   mockSpawnSync: vi.fn(),
@@ -21,7 +22,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { initImagePasteSession, registerImagePaste } from "./index.js";
+import { registerImagePaste } from "./index.js";
 import { NATIVE_READ_TIMEOUT_MS } from "./clipboard.js";
 
 /** Every CLI candidate is missing, so the native helper is the only reader. */
@@ -64,8 +65,8 @@ function createHarness(): Harness {
     on: () => {},
   } as unknown as ExtensionAPI;
 
-  registerImagePaste(pi);
-  initImagePasteSession(ctx);
+  const session = registerImagePaste(pi);
+  session.initSession(ctx);
   const pressKey = handlers.get("ctrl+v")!;
   return { ctx, press: () => pressKey(ctx), inserted, notifications };
 }
@@ -121,7 +122,7 @@ describe("the ctrl+v mutex against a clipboard that never answers", () => {
       await vi.advanceTimersByTimeAsync(NATIVE_READ_TIMEOUT_MS * 3);
       // RED without a deadline on the native read: this await never finishes,
       // the promise stays pending, and every later press is dropped by the
-      // `_pasting` mutex — `ctrl+v` is dead until the session restarts, with no
+      // `pasting` mutex — `ctrl+v` is dead until the session restarts, with no
       // message saying so (measured live: first press still pending after
       // 7.1 s, both later presses silently swallowed, nothing notified).
       await expect(press).resolves.toBeUndefined();

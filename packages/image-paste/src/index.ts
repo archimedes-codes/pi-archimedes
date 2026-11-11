@@ -172,12 +172,32 @@ function getImagePasteShortcuts(): KeyId[] {
   return ["ctrl+v", "alt+v", "ctrl+alt+v"] as KeyId[];
 }
 
-// Module-level state — registered once, queue reset per session
-let _ctx: ExtensionContext | null = null;
-let _queue: ImageQueue | null = null;
-let _pasting = false;
+/**
+ * The per-session handle `registerImagePaste` hands back (#156).
+ *
+ * pi caches an extension MODULE per process but re-invokes the factory with a
+ * fresh `pi` for every session, so state that lives at module scope belongs to
+ * the process, not to a session: a subordinate in-process session (a third-party
+ * subagent child) running its `session_shutdown` used to null the MAIN session's
+ * queue through the package's module-level teardown, and the paste handler
+ * then returned before reading the clipboard — silently, with no message. The
+ * handle is what makes "this session's state" expressible: whoever holds it can
+ * only ever touch the session that created it.
+ */
+export interface ImagePasteSession {
+  /** Adopt this session's ctx and start a fresh queue. Call from session_start. */
+  initSession(ctx: ExtensionContext): void;
+  /** Drop this session's state. Idempotent; touches nothing outside this session. */
+  shutdown(): void;
+}
 
-export function registerImagePaste(pi: ExtensionAPI): void {
+export function registerImagePaste(pi: ExtensionAPI): ImagePasteSession {
+  // Per-session state — created by THIS factory run, reachable only through the
+  // handle returned below. Never module scope: see ImagePasteSession (#156).
+  let ctxRef: ExtensionContext | null = null;
+  let queue: ImageQueue | null = null;
+  let pasting = false;
+
   // Register preview renderer (once)
   registerImagePreview(pi);
 
@@ -206,13 +226,13 @@ export function registerImagePaste(pi: ExtensionAPI): void {
       // bounded (a `spawnSync` timeout per CLI candidate,
       // `NATIVE_READ_TIMEOUT_MS` per native read) — because an unbounded read
       // here would hold the mutex forever and take the key out of service.
-      if (_pasting) return;
-      if (!_queue || !ctx.hasUI) return;
-      _pasting = true;
+      if (pasting) return;
+      if (!queue || !ctx.hasUI) return;
+      pasting = true;
       try {
-        await dispatchClipboardPaste(ctx, _queue);
+        await dispatchClipboardPaste(ctx, queue);
       } finally {
-        _pasting = false;
+        pasting = false;
       }
     };
 
@@ -235,13 +255,13 @@ export function registerImagePaste(pi: ExtensionAPI): void {
     if (event.source === "extension") {
       return { action: "continue" as const };
     }
-    if (!_queue || !_queue.markers.length || !_ctx) {
+    if (!queue || !queue.markers.length || !ctxRef) {
       return { action: "continue" as const };
     }
 
     // ── Marker matching: use consistent key (trimmed text) ──
     let hasMarkers = false;
-    for (const marker of _queue.markers) {
+    for (const marker of queue.markers) {
       if (event.text.includes(markerKey(marker))) {
         hasMarkers = true;
         break;
@@ -250,19 +270,19 @@ export function registerImagePaste(pi: ExtensionAPI): void {
 
     if (!hasMarkers) {
       // No markers found — clear queue (user removed them)
-      _queue.images.length = 0;
-      _queue.markers.length = 0;
-      _queue.nextIndex = 1;
+      queue.images.length = 0;
+      queue.markers.length = 0;
+      queue.nextIndex = 1;
       return { action: "continue" as const };
     }
 
     // Match markers to images using trimmed key
     const imagesToAttach: PendingImage[] = [];
 
-    for (const marker of _queue.markers) {
+    for (const marker of queue.markers) {
       const key = markerKey(marker);
       if (event.text.includes(key)) {
-        const pending = _queue.images.find((img) => img.id === marker.id);
+        const pending = queue.images.find((img) => img.id === marker.id);
         if (pending) {
           imagesToAttach.push(pending);
         }
@@ -270,9 +290,9 @@ export function registerImagePaste(pi: ExtensionAPI): void {
     }
 
     // Clear queue
-    _queue.images.length = 0;
-    _queue.markers.length = 0;
-    _queue.nextIndex = 1;
+    queue.images.length = 0;
+    queue.markers.length = 0;
+    queue.nextIndex = 1;
 
     if (imagesToAttach.length === 0) {
       return { action: "continue" as const };
@@ -297,29 +317,30 @@ export function registerImagePaste(pi: ExtensionAPI): void {
       })),
     };
   });
-}
 
-// Called on session_start to initialize/reset the queue
-export function initImagePasteSession(ctx: ExtensionContext): void {
-  _ctx = ctx;
-  _queue = createImageQueue();
-}
-
-// Called on session_shutdown to clear state
-export function shutdownImagePaste(): void {
-  _ctx = null;
-  _queue = null;
-  _pasting = false;
+  return {
+    initSession(ctx: ExtensionContext): void {
+      ctxRef = ctx;
+      queue = createImageQueue();
+    },
+    shutdown(): void {
+      ctxRef = null;
+      queue = null;
+      pasting = false;
+    },
+  };
 }
 
 // ── Default export (for standalone pi.extensions loading) ─────────────────
 
 // Pi's standalone loader requires a default export functioning as the
 // extension factory. Meta imports the named exports directly (register
-// + session lifecycle), so this default export is standalone-only.
+// + the handle it returns), so this default export is standalone-only.
 export default function (pi: ExtensionAPI): void {
-  registerImagePaste(pi);
-  // Session lifecycle: pi requires per-session ctx for image pasting.
+  const session = registerImagePaste(pi);
+  // Session lifecycle: pi requires per-session ctx for image pasting, and the
+  // state now lives in the handle above, so this session can only ever reset
+  // its own queue (#156 — a foreign session's shutdown used to clear this one).
   //
   // Registered at the TOP LEVEL of this factory — never inside another
   // session_start handler, which would accumulate handlers on /reload
@@ -332,7 +353,9 @@ export default function (pi: ExtensionAPI): void {
   // from keybindings.json, and the gate in `registerImagePaste` above stops us
   // claiming the key. Both read the same setting per session.
   pi.on("session_start", async (_event, ctx) => {
-    initImagePasteSession(ctx);
+    // The queue must be live BEFORE the restore: the restore can reload, and a
+    // session that reloaded with no queue would have a dead paste key.
+    session.initSession(ctx);
     // A broken keybindings.json must never fail a session start; the detail
     // goes to the log sink, never the console.
     try {
@@ -345,6 +368,6 @@ export default function (pi: ExtensionAPI): void {
     }
   });
   pi.on("session_shutdown", (_event, _ctx) => {
-    shutdownImagePaste();
+    session.shutdown();
   });
 }

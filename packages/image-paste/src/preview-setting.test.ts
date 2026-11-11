@@ -31,7 +31,8 @@ vi.mock("./clipboard.js", () => ({
   clipboardTextForEditor: vi.fn(),
 }));
 
-const { registerImagePaste, initImagePasteSession, shutdownImagePaste } = await import("./index.js");
+const { registerImagePaste } = await import("./index.js");
+type ImagePasteSession = ReturnType<typeof registerImagePaste>;
 const { saveImagePastePreview } = await import("./settings.js");
 
 const NAMESPACE = "archimedes.imagePaste";
@@ -50,6 +51,12 @@ interface SubmitResult {
   images?: unknown[];
 }
 
+// The handle of the most recently registered session. State is per session now
+// (#156), so the resets below drop exactly the session the previous case left
+// behind — the module-level `shutdownImagePaste()` they replace dropped every
+// session's at once, which was the bug.
+let activeSession: ImagePasteSession | null = null;
+
 /** Register once; `pasteAndSubmit()` then drives the same handlers each time. */
 function registerSession() {
   const pi = {
@@ -62,8 +69,9 @@ function registerSession() {
   const notify = vi.fn();
   const ctx = { hasUI: true, ui: { notify, pasteToEditor: vi.fn() } };
 
-  registerImagePaste(pi as never);
-  initImagePasteSession(ctx as never);
+  const session = registerImagePaste(pi as never);
+  session.initSession(ctx as never);
+  activeSession = session;
 
   const paste = pi.registerShortcut.mock.calls[0]![1].handler as Handler;
   const input = pi.on.mock.calls.find((call) => call[0] === "input")![1] as Handler;
@@ -74,7 +82,7 @@ function registerSession() {
     return (await input({ text: "[Image #1] look", source: "interactive" })) as SubmitResult;
   }
 
-  return { pi, notify, pasteAndSubmit };
+  return { pi, notify, pasteAndSubmit, session };
 }
 
 /** Register, paste one image through the shortcut, submit it; report what happened. */
@@ -86,7 +94,8 @@ async function pasteAndSubmit() {
 
 beforeEach(() => {
   fs.rmSync(settingsPath(), { force: true });
-  shutdownImagePaste();
+  activeSession?.shutdown();
+  activeSession = null;
   mockReadClipboardImage.mockReset();
   mockReadClipboardImage.mockResolvedValue({ bytes: new Uint8Array([1, 2, 3]), mimeType: "image/png" });
 });
@@ -137,7 +146,8 @@ describe("archimedes.imagePaste.preview", () => {
   it("treats a value that is not the boolean false as on", async () => {
     for (const value of ["false", 0]) {
       writeSettings({ preview: value });
-      shutdownImagePaste();
+      // Drop the previous iteration's session (its own handle — #156).
+      activeSession?.shutdown();
       const { pi } = await pasteAndSubmit();
       expect(pi.sendMessage, `preview=${JSON.stringify(value)}`).toHaveBeenCalledTimes(1);
     }
