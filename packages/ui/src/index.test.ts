@@ -706,11 +706,14 @@ describe("packages/ui lifecycle and registration", () => {
       expect(patchStartupListing).not.toHaveBeenCalled();
       expect(revealStartupListing).not.toHaveBeenCalled();
 
-      // Teardown still runs its one unconditional stop — cheap and idempotent —
-      // while the ref freeze is guarded on there being a ref, so an off session
-      // cannot resurrect an animation that was never built.
+      // Teardown runs NO stop at all: `stopStartupListing()` stops the module
+      // pair of timers in `startup/index.ts`, and a session that never installed
+      // a header never armed them — so it has no claim on them (#156: that
+      // unguarded call is how a subagent child's shutdown froze the live main
+      // session's splash). The ref freeze stays guarded on there being a ref, so
+      // an off session cannot resurrect an animation that was never built.
       triggerShutdown(ctx);
-      expect(stopStartupListing).toHaveBeenCalledTimes(1);
+      expect(stopStartupListing).not.toHaveBeenCalled();
       expect(renderHeader).not.toHaveBeenCalled();
     });
   });
