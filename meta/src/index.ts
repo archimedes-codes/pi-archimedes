@@ -47,6 +47,15 @@ const imagePasteSessions = new Map<string, ImagePasteSession>();
  * ctx; a harness ctx without one falls back to a single shared key rather than
  * throwing, so a missing session manager degrades to the old single-slot behaviour
  * instead of crashing session_start.
+ *
+ * Both call sites — the `session_start` that stores and the `session_shutdown`
+ * that deletes — must resolve the SAME session, or an entry is orphaned and a
+ * live session's handle is dropped by the wrong teardown. pi guarantees that:
+ * `/new`, `/resume`, `/fork` and `/reload` all emit `shutdown(old)` BEFORE
+ * `start(new)` (research §6, observed against 1.5.0), and the shutdown's ctx is
+ * built from the runner being torn down, so its `sessionManager` still reports
+ * the dying session's id (research §3). Do not "simplify" either side to read
+ * the id at a different moment than the other.
  */
 const UNKEYED_SESSION = "__unkeyed__";
 function sessionKey(ctx: ExtensionContext): string {
