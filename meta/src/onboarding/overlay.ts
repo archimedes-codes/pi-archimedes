@@ -180,7 +180,7 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const marker = i === (cursorByStep[0] ?? 0) ? "> " : "  ";
         lines.push(
           padEnd(
-            `${marker}${opt.label.padEnd(9)}${truncateToWidth(opt.description, width - 14, "")}`,
+            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, width - 14, "")}`,
             width - 2,
           ),
         );
@@ -196,7 +196,7 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const marker = i === (cursorByStep[1] ?? 0) ? "> " : "  ";
         lines.push(
           padEnd(
-            `${marker}${opt.label.padEnd(9)}${truncateToWidth(opt.description, width - 14, "")}`,
+            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, width - 14, "")}`,
             width - 2,
           ),
         );
@@ -217,7 +217,7 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const label = truncateToWidth(p.label, 15, "");
         lines.push(
           padEnd(
-            `${cursor} ${marker} ${label.padEnd(16)}${truncateToWidth(p.description, width - 26, "")}`,
+            `${cursor} ${marker} ${padEnd(label, 16)}${truncateToWidth(p.description, width - 26, "")}`,
             width - 2,
           ),
         );
@@ -234,7 +234,7 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         // Options render consecutively (no blank line between them): the 10
         // options must fit the overlay's 80% max height on a small terminal
         // (24 rows → ~19), so the per-option vertical spacing was dropped.
-        lines.push(padEnd(`${marker}${name.padEnd(15)}${preview}`, width - 2));
+        lines.push(padEnd(`${marker}${padEnd(name, 15)}${preview}`, width - 2));
       }
       lines.push("");
       lines.push(renderFooter(" [↑↓] move  [enter] done  [esc] finish (skip rest) ", width - 2, theme));
