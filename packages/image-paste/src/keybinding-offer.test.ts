@@ -223,7 +223,7 @@ describe("offerKeybindingFix — gate matrix", () => {
       if (mode !== "tui") expect(confirm).not.toHaveBeenCalled();
 
       if (shouldAsk) {
-        // confirm is called with the TITLE FIRST (docs/extensions.md:165)
+        // confirm is called with the TITLE FIRST (confirm(title, message))
         const [title, message] = callArgs(confirm)[0] as [string, string];
         expect(title).toBe("First run");
         expect(typeof message).toBe("string");

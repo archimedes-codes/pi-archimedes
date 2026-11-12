@@ -594,7 +594,8 @@ describe("subagent tool rows: width audit", () => {
   });
 
   // The collapsed view is a summary: one row per line, cut at the frame. The
-  // expanded view is where the run is meant to be read in full (ADR 0020), so a
+  // expanded view is where the run is meant to be read in full (ADR 0020 sets
+  // the no-other-source rule for the model-facing content; it carries here), so a
   // line that carries content and no second copy of it — the stats line: turns,
   // tools, tokens, duration, cost — has to keep wrapping there. As a row it is
   // cut at the frame, and below ~64 columns the tail (tokens, duration, cost)

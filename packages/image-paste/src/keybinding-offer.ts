@@ -308,7 +308,7 @@ export async function offerKeybindingFix(ctx: ExtensionContext): Promise<boolean
     return false;
   }
 
-  // Gate 5: ask (confirm signature is TITLE first — docs/extensions.md:165)
+  // Gate 5: ask (confirm(title, message): TITLE first — pi's types.d.ts)
   const confirmed = await ctx.ui.confirm(CONFIRM_TITLE, CONFIRM_MESSAGE);
 
   // No, or cancel (Esc/timeout — `confirm` resolves `false` either way counts
