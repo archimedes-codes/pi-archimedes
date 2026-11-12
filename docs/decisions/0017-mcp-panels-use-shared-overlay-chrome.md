@@ -1,4 +1,4 @@
-# ADR 0003: MCP panels use the shared pi-archimedes overlay chrome
+# MCP panels use the shared pi-archimedes overlay chrome
 
 **Status:** Accepted
 **Date:** 2026-08-17
@@ -18,7 +18,7 @@ Concretely:
 
 ## Alternatives considered
 
-1. **Generic pi-tui components** (`SelectList`, `DynamicBorder`, `Container`) — the pattern from `docs/tui.md`. Works, but produces a look inconsistent with the rest of pi-archimedes, and `SelectList` (single-select picker) is a poor fit for an expandable server→tools tree with per-row toggles.
+1. **Generic pi-tui components** (`SelectList`, `DynamicBorder`, `Container`) — the pattern from pi's `docs/tui.md`. Works, but produces a look inconsistent with the rest of pi-archimedes, and `SelectList` (single-select picker) is a poor fit for an expandable server→tools tree with per-row toggles.
 2. **Raw ANSI `string[]`** (the pi-mcp-adapter approach) — full control but reimplements border/width math the shared chrome already provides, and doesn't theme-adapt cleanly.
 
 ## Rationale

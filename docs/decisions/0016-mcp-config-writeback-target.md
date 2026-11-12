@@ -1,4 +1,4 @@
-# ADR 0002: MCP config write-back always targets .pi/mcp.json
+# MCP config write-back always targets .pi/mcp.json
 
 **Status:** Accepted
 **Date:** 2026-08-17

@@ -1,4 +1,4 @@
-# ADR 0004: MCP connection outcome persists in the metadata cache
+# MCP connection outcome persists in the metadata cache
 
 **Status:** Accepted
 **Date:** 2026-08-19
