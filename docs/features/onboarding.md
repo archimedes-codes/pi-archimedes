@@ -1,7 +1,7 @@
 ---
 status: live
-last-verified: 2026-09-30
-verified-by: npx vitest run meta/src/onboarding/overlay.test.ts meta/src/onboarding/index.test.ts
+last-verified: 2026-11-12
+verified-by: 'cd meta && npx vitest run src/onboarding/ → 48 passed (3 files: `overlay-layout.test.ts` 12, `overlay.test.ts` 25 — including "spinner step renders options consecutively (no blank line between them)" and "spinner step with the 10 real SPINNER_STYLES renders exactly 19 lines" — and `index.test.ts` 11). `cd meta && npx vitest run src/overlay-width-audit.test.ts src/citation-discipline.test.ts` → 9 passed (2 files: the frame-width audit and the citation guard). `cd meta && npx tsc --noEmit` clean. This replaces the earlier note here that `meta/src/onboarding/overlay-layout.test.ts` did not exist on the base: it exists on this branch and passes, so all three onboarding test files ARE covered by this verification. The width-contract paragraph was read against `packages/core/src/overlay.ts` (`borderContentWidth` at :64, `padEnd` at :49, `wrapWithBorder` allocating `width - 4` at :85-86, and the row-padding `padEnd(line, contentWidth)` call cited by function — `wrapWithBorder` — rather than by line) and `meta/src/onboarding/overlay.ts` (the 15-column label cap at :224, moved from :217 by the merge); the style values and defaults against `packages/ui/src/config.ts` (`ToolStyle` at :28, `DEFAULT_UI_CONFIG.toolStyle` at :111).'
 ---
 
 # First-run onboarding
@@ -14,9 +14,20 @@ is unset. It is a single pure `ui.custom` overlay with an internal `step`
 state (0 → 1 → 2 → 3), no open/close flicker between steps, and — on the
 spinner step — live 4-cell spinner previews that animate on a 40 ms tick when
 the TUI repaint hook is available. The thinking and tool styles are two
-INDEPENDENT questions (each `Full` / `Compact`, with a short description per
-option), so the user can mix — e.g. "Full thinking" + "Compact tools". The
-spinner options are separated by a blank line for slight vertical spacing.
+INDEPENDENT questions (thinking is `Full` / `Compact`, tools are `Native` /
+`Minimal`, with a short description per option), so the user can mix — e.g.
+"Full thinking" + "Minimal tools". The spinner options render consecutively,
+with no blank line between them, which keeps the tallest step at 19 lines so
+all 10 spinners fit the overlay's 80% max height on a 24-row terminal.
+
+Every row is sized from `borderContentWidth(width)`
+(`@pi-archimedes/core/overlay`) — never hand-rolled arithmetic — because
+`wrapWithBorder` allocates `width - 4` and silently clips anything wider: a
+wrong constant shows up as lost columns, never as a broken frame. The plugin
+step's label column is capped at 15 columns and padded into a 16-column field
+with the chrome's visible-width `padEnd`, never `String.prototype.padEnd` — the
+latter counts `.length`, and pi-tui appends a reset sequence when it truncates,
+so a cut label pads to zero spaces and its description lands flush against it.
 
 ## What it writes
 
@@ -24,8 +35,8 @@ The write runs at most once per run (per-invocation idempotence):
 
 - `archimedes.ui.thinkingStyle` — from the **thinking style** choice (Full or
   Compact).
-- `archimedes.ui.toolStyle` — from the **tool style** choice (Full or Compact),
-  written **independently** of `thinkingStyle`.
+- `archimedes.ui.toolStyle` — from the **tool style** choice (Native or
+  Minimal), written **independently** of `thinkingStyle`.
 - `archimedes.ui.editorSpinStyle` — the chosen spinner.
 - Changed plugin `enabled` flags — only the ones that differ from the current
   state (`setPluginEnabled` per changed plugin).
@@ -54,6 +65,6 @@ expectations are set before they answer.
 |-----|---------|-------|
 | `archimedes.meta.onboarded` | `false` (absent) | Set to `true` after a successful onboarding write. Delete to re-run the wizard. |
 | `archimedes.ui.thinkingStyle` | `Full` | Seeded from the **thinking style** choice. |
-| `archimedes.ui.toolStyle` | `Compact` | Seeded from the **tool style** choice, independently of `thinkingStyle`. |
+| `archimedes.ui.toolStyle` | `Minimal` | Seeded from the **tool style** choice, independently of `thinkingStyle`. |
 | `archimedes.ui.editorSpinStyle` | `pendulum` | The chosen spinner. |
 | plugin `enabled` flags | `true` (absent) | Only changed flags are written. |
