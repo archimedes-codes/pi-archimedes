@@ -333,6 +333,95 @@ describe("sudo_exec tool", () => {
 		});
 	});
 
+	describe("confirmation while a credential is cached (ADR 0033)", () => {
+		// The bridge test below turns the bridge on; reset it so the rest of the
+		// file keeps exercising the TUI path (this describe is outside the
+		// bridge block that owns the existing afterEach).
+		afterEach(() => {
+			bridgeState.active = false;
+			bridgeState.confirm.mockReset();
+			bridgeState.password.mockReset();
+		});
+
+		it("confirms on every run by default, even with a cached credential, and records no skip", async () => {
+			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("cachedpw", 60_000);
+			const spies = spiesNoPrompt();
+			const result = await run(tool, tuiCtxWithSpies(true, spies), { command: "id", reason: "whoami" });
+
+			expect(spies.confirmCalls).toHaveLength(1);
+			expect(spies.confirmCalls[0]?.message).toContain("id");
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
+		});
+
+		it("skips the confirmation for a cached credential when confirmWhenCached is false, and says so in the details", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("cachedpw", 60_000);
+			const spies = spiesNoPrompt();
+			const result = await run(tool, tuiCtxWithSpies(true, spies), { command: "id", reason: "whoami" });
+
+			expect(spies.confirmCalls).toHaveLength(0); // no human click for a cached credential
+			expect(result.isError).toBeFalsy();
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+		});
+
+		it("still confirms when the cache is empty, because that run is what asks for the password", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			const spies = spiesNoPrompt();
+			spies.customCalls.length = 0;
+			const ui = {
+				confirm: (title: string, message: string) => {
+					spies.confirmCalls.push({ title, message });
+					return Promise.resolve(true);
+				},
+				// the masked prompt resolves "" = cancelled, so nothing runs
+				custom: (factory: unknown): Promise<string> => {
+					spies.customCalls.push(factory);
+					return Promise.resolve("");
+				},
+			};
+			const ctx = { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext;
+			const result = await run(tool, ctx, { command: "id", reason: "whoami" });
+
+			expect(spies.confirmCalls).toHaveLength(1); // cache miss → the gate stays
+			expect((result.content[0] as { text: string }).text).toMatch(/password entry cancelled/i);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
+		});
+
+		it("marks a failed run that skipped the gate too", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({ stdout: "", stderr: "boom\n", code: 7 });
+			const { authProbe, passwordProbe } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
+			credentialCache.set("cachedpw", 60_000);
+			const result = await run(tool, tuiCtxWithSpies(true, spiesNoPrompt()), { command: "false", reason: "check" });
+
+			expect(result.isError).toBe(true);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+		});
+
+		it("applies the same rule in bridge mode: no Client confirm when the credential is cached", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			bridgeState.active = true;
+			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("cachedpw", 60_000);
+			const ui = { confirm: vi.fn(), custom: vi.fn() } as unknown as ExtensionContext["ui"];
+
+			await run(tool, { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext, {
+				command: "id",
+				reason: "whoami",
+			});
+
+			expect(bridgeState.confirm).not.toHaveBeenCalled();
+		});
+	});
+
 	describe("buildSudoArgv", () => {
 		it("builds sudo -S argv for a plain command", () => {
 			expect(buildSudoArgv("apt install ripgrep")).toEqual(["sudo", "-S", "apt", "install", "ripgrep"]);

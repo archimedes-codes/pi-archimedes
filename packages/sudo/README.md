@@ -29,6 +29,7 @@ After installing Pi, choose one installation command above, then `cd` into your 
 ## What you get
 
 - **`sudo_exec` tool** — runs a privileged command via `sudo -S`, showing the exact command and a human-readable **reason** for confirmation before any credential prompt appears. A declined confirmation means nothing runs and no password is requested.
+- **Optional quieter confirmation** — `confirmWhenCached: false` skips the per-command confirmation while a credential is already cached, so an approved credential window is not interrupted by one dialog per privileged step. Off by default; the run is then recorded with `confirmationSkipped: true` in the tool details ([ADR 0033](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0033-sudo-confirmation-while-cached.md)).
 - **Masked password prompt** — the password is typed into a masked UI and passed to sudo via stdin only. It is never in argv, environment variables, command logs, or the LLM context.
 - **Defensive output scrubbing** — command output lines that contain the password are redacted before they reach the tool result. That is a literal-substring scrub: it catches common cases, and it is **not** universal leak protection.
 - **Credential cache** — a single in-memory cache with a TTL (15 minutes by default, `ttlMs`); cleared on authentication failure, at `session_start`/`session_shutdown`, and by `/sudo forget`.
@@ -70,6 +71,16 @@ The guard is a **heuristic with accepted residual bypasses** documented in the [
 |---------|------|---------|-------------|
 | `ttlMs` | number | `900000` | Password cache TTL in milliseconds (default 15 minutes) |
 | `defaultTimeoutMs` | number | `120000` | `sudo_exec` default command timeout in milliseconds (default 120 seconds) |
+| `confirmWhenCached` | boolean | `true` | Ask for confirmation before every `sudo_exec`, even with a cached credential. Set to `false` to confirm only when a password will be requested (the first privileged command per session) and skip it otherwise; the tool details then carry `confirmationSkipped: true`. Keep `ttlMs` short if you enable this — the cache window is what bounds unattended privileged runs ([ADR 0033](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0033-sudo-confirmation-while-cached.md)) |
+
+### When the confirmation is skipped
+
+With `confirmWhenCached: false`, a privileged command whose credential is already cached runs without a confirmation dialog. Everything else is unchanged:
+
+- A **cache miss** still confirms first and then asks for the password — the first privileged command of a session always has both.
+- The **command and reason** stay in the tool call, so the transcript still records exactly what was run and why.
+- The tool details report **`confirmationSkipped: true`** for that run, which is how a skipped gate is told apart from one the user approved.
+- `/sudo forget`, `session_shutdown`, `ttlMs`, and an authentication failure all close the window and bring the confirmation back.
 
 ### Credential handling when sudo retains no verifiable ticket
 
