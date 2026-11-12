@@ -5,7 +5,8 @@
  * `VisualLinePreview`/`truncateToVisualLines`, which are handed `render(width)`'s
  * width. That module is not importable (pi's export map is `.` and `./rpc-entry`),
  * so the rows here get the same behaviour from pi-tui's own helpers — the
- * sanctioned route, per ADR 0029 ("width maths goes through pi-tui helpers").
+ * sanctioned route: pi's `docs/tui.md` (in `@earendil-works/pi-coding-agent`)
+ * asks for pi-tui's own width helpers over hand-rolled measurement.
  *
  * Two kinds of content, because the subagent draws two kinds of thing:
  *
@@ -16,7 +17,9 @@
  *     would become a multi-row block instead of one full-width row.
  *   * a **block** — multi-line content that is meant to be read in full (the
  *     expanded view's output, its task text, its tool-call history). It wraps,
- *     as it always has (ADR 0020: expanded output is deliberately untruncated).
+ *     as it always has. ADR 0020 governs the model-facing tool result, not
+ *     this view; its reasoning — never cap what the reader has no other
+ *     source for — carries over, and `expanded.ts` reads it the same way.
  *
  * The width therefore arrives per-render and nothing is cached across renders
  * except keyed by (content, width).
