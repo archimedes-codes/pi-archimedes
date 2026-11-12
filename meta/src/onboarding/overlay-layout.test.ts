@@ -3,10 +3,11 @@
  *
  * `meta/src/overlay-width-audit.test.ts` measures whether every produced line
  * lands on the frame. It cannot see a row that is under-sized: `wrapWithBorder`
- * calls `padEnd(line, contentWidth)` (`packages/core/src/overlay.ts:94`), which
- * pads short rows up and truncates long ones, so a row built to any width at all
- * still measures exactly the frame. That audit therefore passes on an 18-column
- * layout regression (verified by mutation) — it detects bleed, not layout.
+ * calls `padEnd(line, contentWidth)` (in `wrapWithBorder`,
+ * `packages/core/src/overlay.ts`), which pads short rows up and truncates long
+ * ones, so a row built to any width at all still measures exactly the frame.
+ * That audit therefore passes on an 18-column layout regression (verified by
+ * mutation) — it detects bleed, not layout.
  *
  * This file measures the fields INSIDE a row instead: the label column and the
  * description column of the plugin step, in drawn columns, against the content
