@@ -78,9 +78,9 @@ vi.mock("@pi-archimedes/diff", () => ({
   registerDiffTools: vi.fn(),
 }));
 vi.mock("@pi-archimedes/image-paste", () => ({
-  registerImagePaste: vi.fn(),
-  shutdownImagePaste: vi.fn(),
-  initImagePasteSession: vi.fn(),
+  // Task 1 made registration hand back a per-session handle; meta stores it per
+  // session id, so the spies live on the handle, not on module-level functions.
+  registerImagePaste: vi.fn(() => ({ initSession: vi.fn(), shutdown: vi.fn() })),
 }));
 vi.mock("@pi-archimedes/image-paste/keybinding-offer", () => ({
   offerKeybindingFix: vi.fn(),
@@ -104,8 +104,7 @@ vi.mock("./onboarding/index.js", () => ({ runOnboarding: vi.fn(async () => {}) }
 // (read via the mocked settings-io on each call → mutable mid-session).
 const { default: metaFactory } = await import("./index.js");
 
-const { registerImagePaste, shutdownImagePaste, initImagePasteSession } =
-  await import("@pi-archimedes/image-paste");
+const { registerImagePaste } = await import("@pi-archimedes/image-paste");
 
 const { offerKeybindingFix, runNativePasteRestore } =
   await import("@pi-archimedes/image-paste/keybinding-offer");
@@ -146,7 +145,7 @@ function makePi(): PiHarness {
 function freshFactory(): {
   harness: PiHarness;
   startSession: (ctx: unknown) => Promise<unknown>;
-  shutdownSession: () => unknown;
+  shutdownSession: (ctx?: unknown) => unknown;
   /** Fire ONLY the first-run (merged) session_start handler (the one
    *  registered before the lazy-load handler). Useful for isolating the
    *  offer → onboarding sequencing without triggering the heavy
@@ -174,12 +173,41 @@ function freshFactory(): {
   return {
     harness,
     startSession: (ctx: unknown) => startRc(undefined, ctx) as Promise<unknown>,
-    shutdownSession: () => shutdownRc(undefined, {}),
+    // Forwards the ctx so the handler can resolve the shutting-down session's
+    // key — real pi hands every handler the ctx of the session it is tearing
+    // down (or replacing), never a bare `{}`.
+    shutdownSession: (ctx: unknown = {}) => shutdownRc(undefined, ctx),
     fireFirstRunHandler: (ctx: unknown) => {
       firstRunRc(undefined, ctx);
     },
     startRcCount: startRcs.length,
   };
+}
+
+/**
+ * The handle the nth `registerImagePaste` call returned. Reaching the spies
+ * through the mock's results is how you assert on a handle's methods — the
+ * module-level `shutdownImagePaste` / `initImagePasteSession` the old tests
+ * counted no longer exist (#156, Task 1).
+ */
+interface ImagePasteHandle {
+  initSession: ReturnType<typeof vi.fn>;
+  shutdown: ReturnType<typeof vi.fn>;
+}
+function handleForCall(index: number): ImagePasteHandle {
+  const results = vi.mocked(registerImagePaste).mock.results;
+  const result = results[index];
+  if (!result) {
+    throw new Error(
+      `registerImagePaste was called ${results.length} time(s); no call #${index}`,
+    );
+  }
+  return result.value as ImagePasteHandle;
+}
+
+/** A ctx carrying the session id meta keys its per-session state by. */
+function sessionCtx(id: string): { sessionManager: { getSessionId: () => string } } {
+  return { sessionManager: { getSessionId: () => id } };
 }
 
 beforeEach(() => {
@@ -188,49 +216,64 @@ beforeEach(() => {
 });
 
 describe("image-paste factory lifecycle (registration is config-gated, teardown is liveness-gated)", () => {
-  it("still runs shutdownImagePaste when the plugin is toggled OFF mid-session (via /plugins)", async () => {
+  it("still tears down this session's handle when the plugin is toggled OFF mid-session (via /plugins)", async () => {
     // Store empty → image-paste enabled by default at session start
     const { startSession, shutdownSession } = freshFactory();
-    await startSession({});
+    await startSession(sessionCtx("session-A"));
     expect(vi.mocked(registerImagePaste)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(initImagePasteSession)).toHaveBeenCalledTimes(1);
+    const a = handleForCall(0);
+    expect(a.initSession).toHaveBeenCalledTimes(1);
 
     // Mid-session: user toggles image-paste OFF via /plugins (persists
     // immediately to its own namespace).
     mockStore["archimedes.imagePaste"] = { enabled: false };
 
     // Session ends → cleanup MUST still run for this session's registration.
-    shutdownSession();
-    expect(vi.mocked(shutdownImagePaste)).toHaveBeenCalledTimes(1);
+    shutdownSession(sessionCtx("session-A"));
+    expect(a.shutdown).toHaveBeenCalledTimes(1);
   });
 
   it("registers nothing and tears down nothing when config is off at session start", async () => {
     mockStore["archimedes.imagePaste"] = { enabled: false };
     const { startSession, shutdownSession } = freshFactory();
-    await startSession({});
+    await startSession(sessionCtx("session-A"));
     expect(vi.mocked(registerImagePaste)).not.toHaveBeenCalled();
-    expect(vi.mocked(initImagePasteSession)).not.toHaveBeenCalled();
 
-    shutdownSession();
-    expect(vi.mocked(shutdownImagePaste)).not.toHaveBeenCalled();
+    shutdownSession(sessionCtx("session-A"));
+    // No handle was ever created, so the keyed lookup had nothing to shut down:
+    // the map stays empty and no teardown ran (this is what the old stale-ref
+    // null-out was approximating, now true by construction).
+    expect(vi.mocked(registerImagePaste).mock.results).toHaveLength(0);
   });
 
-  it("does not re-execute a stale shutdown ref from a previous session", async () => {
-    // Session A: enabled → registered → shutdown (cleanup runs, once).
+  it("does not re-execute a stale handle: two sessions through ONE factory run (#156)", async () => {
+    // ONE factory run — pi caches the module, so one process means one factory
+    // run serving every session. Two `freshFactory()` calls would give each
+    // session its own module closure and pass this trivially; that is exactly
+    // the shape that hid #156 from this file before.
     const { startSession, shutdownSession } = freshFactory();
-    await startSession({});
-    expect(vi.mocked(registerImagePaste)).toHaveBeenCalledTimes(1);
-    shutdownSession();
-    expect(vi.mocked(shutdownImagePaste)).toHaveBeenCalledTimes(1);
 
-    // Session B: toggled off before start → NOT registered.
+    // Session A: enabled → registered → its handle stored under "A".
+    await startSession(sessionCtx("A"));
+    expect(vi.mocked(registerImagePaste)).toHaveBeenCalledTimes(1);
+    const a = handleForCall(0);
+
+    // Session B: toggled off before start → NOT registered, no entry for "B".
     mockStore["archimedes.imagePaste"] = { enabled: false };
-    await startSession({});
+    await startSession(sessionCtx("B"));
     expect(vi.mocked(registerImagePaste)).toHaveBeenCalledTimes(1); // still 1
 
-    // Session B shutdown must not re-run the (stale) session-A ref.
-    shutdownSession();
-    expect(vi.mocked(shutdownImagePaste)).toHaveBeenCalledTimes(1); // exactly once total
+    // B's shutdown must not run A's teardown — the old single ref did.
+    shutdownSession(sessionCtx("B"));
+    expect(a.shutdown, "a foreign session's shutdown ran a live session's teardown").not.toHaveBeenCalled();
+
+    // A's own shutdown still runs it — exactly once.
+    shutdownSession(sessionCtx("A"));
+    expect(a.shutdown).toHaveBeenCalledTimes(1);
+
+    // And B can never re-trigger A's teardown afterwards.
+    shutdownSession(sessionCtx("B"));
+    expect(a.shutdown).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -339,7 +382,6 @@ describe("native-paste restore call site (composed suite)", () => {
     const before: Array<[string, unknown]> = [
       ["registerDiffTools", registerDiffTools],
       ["registerImagePaste", registerImagePaste],
-      ["initImagePasteSession", initImagePasteSession],
       ["registerSubagent", registerSubagent],
       ["registerAgentsCommand", registerAgentsCommand],
       ["registerWeb", registerWeb],
@@ -352,6 +394,19 @@ describe("native-paste restore call site (composed suite)", () => {
         `${name} must run before the restore — the restore's reload invalidates ctx`,
       ).toBeLessThan(restoreOrder as number);
     }
+    // `initSession` is its OWN call, not part of registration: it has to run
+    // after `registerImagePaste` (the handle must exist) and before the restore
+    // (it captures the ctx the restore's reload invalidates).
+    const initOrder = handleForCall(0).initSession.mock.invocationCallOrder[0];
+    expect(handleForCall(0).initSession).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(registerImagePaste).mock.invocationCallOrder[0],
+      "initSession must run after registerImagePaste — the handle comes first",
+    ).toBeLessThan(initOrder as number);
+    expect(
+      initOrder,
+      "initSession must run before the restore — the restore's reload invalidates ctx",
+    ).toBeLessThan(restoreOrder as number);
   });
 
   it("when the restore reloads, that reload is the LAST interaction with the session ctx", async () => {

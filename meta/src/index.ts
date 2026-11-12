@@ -1,4 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+// TYPE-ONLY on purpose: the package itself is lazy-loaded inside `session_start`
+// (heavy deps must not load at startup) and a value import here would defeat that.
+import type { ImagePasteSession } from "@pi-archimedes/image-paste";
 
 import { time as archTime, print as archPrintTimings, reset as archResetTimings } from "@pi-archimedes/core/profiler";
 import { diag, describeError } from "@pi-archimedes/core/log";
@@ -31,12 +34,33 @@ import { loadDiffConfig } from "./config.js";
 import { openSettings } from "./settings.js"
 import { registerPluginsCommand } from "./plugin-manager.js"
 
-// Module-level ref for shutdown (survives session replacements)
-let imagePasteShutdown: (() => void) | undefined;
-// Module-level ref for current session context (survives /reload, /new, /fork)
-// Used by diff's theme getter callback — updated every session_start so the
-// getter always returns the latest ctx's theme even after session replacement.
-let currentCtx: ExtensionContext | undefined;
+/**
+ * Per-session state for extensions meta registers from inside `session_start`
+ * but must tear down from a top-level `session_shutdown` handler (AGENTS.md).
+ * Keyed by session id so a foreign session's shutdown can only ever reach its
+ * own entry — a single stored ref is what let #156 kill a live session.
+ */
+const imagePasteSessions = new Map<string, ImagePasteSession>();
+
+/**
+ * The key a session's state is stored under. `sessionManager` is required on a real
+ * ctx; a harness ctx without one falls back to a single shared key rather than
+ * throwing, so a missing session manager degrades to the old single-slot behaviour
+ * instead of crashing session_start.
+ *
+ * Both call sites — the `session_start` that stores and the `session_shutdown`
+ * that deletes — must resolve the SAME session, or an entry is orphaned and a
+ * live session's handle is dropped by the wrong teardown. pi guarantees that:
+ * `/new`, `/resume`, `/fork` and `/reload` all emit `shutdown(old)` BEFORE
+ * `start(new)` (research §6, observed against 1.5.0), and the shutdown's ctx is
+ * built from the runner being torn down, so its `sessionManager` still reports
+ * the dying session's id (research §3). Do not "simplify" either side to read
+ * the id at a different moment than the other.
+ */
+const UNKEYED_SESSION = "__unkeyed__";
+function sessionKey(ctx: ExtensionContext): string {
+  return ctx.sessionManager?.getSessionId?.() ?? UNKEYED_SESSION;
+}
 
 export default function (pi: ExtensionAPI): void {
   // Must run before any isPluginEnabled gate evaluation: re-points the
@@ -81,13 +105,16 @@ export default function (pi: ExtensionAPI): void {
 
   // session_shutdown handler (top-level to prevent accumulation on /reload)
   pi.on("session_shutdown", (_event, _ctx) => {
-    // Liveness-gated on the ref itself: it is set only when image-paste was
-    // registered during THIS session (session_start, gated by config at that
-    // moment). Config may be toggled mid-session via /plugins — cleanup must
-    // still run. Nulled afterwards so a later never-registered session cannot
-    // re-execute a stale ref.
-    imagePasteShutdown?.();
-    imagePasteShutdown = undefined;
+    // Ownership is the KEY, not the liveness of a stored ref: look up the entry
+    // THIS session registered and drop only that one. This replaces the old
+    // module-scope `imagePasteShutdown` ref, which any session's shutdown could
+    // fire — that is what let a subordinate session's teardown destroy a live
+    // session's state (#156). A session that registered nothing (config toggled
+    // off mid-session via /plugins) finds no entry and runs nothing, so the
+    // stale-ref guard the old code needed is now a property of the map.
+    const key = _ctx ? sessionKey(_ctx as ExtensionContext) : UNKEYED_SESSION;
+    imagePasteSessions.get(key)?.shutdown();
+    imagePasteSessions.delete(key);
     archPrintTimings();
   });
 
@@ -129,9 +156,6 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
     archTime(`session_start (factory was ${Date.now() - _moduleEvalAt}ms ago)`);
 
-    // Update module-level context ref so lazy-loaded callbacks always see current session
-    currentCtx = ctx;
-
     // ── Parallel lazy-load all four packages (saves ~100ms vs sequential) ──
     const [diffMod, ipMod, saMod, webMod] = await Promise.all([
       isPluginEnabled("diff")
@@ -160,16 +184,24 @@ export default function (pi: ExtensionAPI): void {
     // persisted across sessions while each new session creates a fresh
     // Extension with empty tools/commands maps.
     if (diffMod) {
-      diffMod.registerDiffTools(pi, () => currentCtx!.ui.theme, () => loadDiffConfig());
+      // The theme getter closes over THIS call's ctx — the session that
+      // registered it (it used to read a module-scope "current ctx" ref that
+      // any other session's session_start could repoint, which after that
+      // session was disposed threw on every property read; #156).
+      diffMod.registerDiffTools(pi, () => ctx.ui.theme, () => loadDiffConfig());
     }
     if (ipMod) {
       // registerImagePaste calls pi.on("input", ...) and pi.registerShortcut()
       // on the current Extension. Since each session replacement creates a
       // new Extension with its own handler list, there is no accumulation.
-      ipMod.registerImagePaste(pi);
-      imagePasteShutdown = ipMod.shutdownImagePaste;
-      // initImagePasteSession must run every session_start (captures fresh ctx)
-      ipMod.initImagePasteSession(ctx);
+      // The handle it returns is stored under THIS session's id, so only this
+      // session's shutdown can reach its teardown (#156).
+      const session = ipMod.registerImagePaste(pi);
+      imagePasteSessions.set(sessionKey(ctx), session);
+      // initSession must run every session_start (captures fresh ctx) and stay
+      // AFTER registerImagePaste / BEFORE runNativePasteRestore — the restore's
+      // settings reload invalidates ctx, so nothing may use it afterwards.
+      session.initSession(ctx);
     }
     if (saMod) {
       saMod.registerSubagent(pi);

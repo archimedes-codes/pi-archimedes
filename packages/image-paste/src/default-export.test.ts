@@ -11,10 +11,92 @@ vi.mock("./keybinding-offer.js", () => ({
   suiteMayClaimPasteKey: vi.fn(() => true),
 }));
 
+// The isolation case below drives a real paste through the standalone handlers,
+// so the clipboard readers are mocked (no shelling out) and the settings read is
+// pointed at a scratch dir — `core/settings-io` captures
+// `join(getAgentDir(), "settings.json")` at module load.
+const { tempDir, fs, join, mockReadClipboardImage } = vi.hoisted(() => {
+  const fs = require("node:fs");
+  const { join } = require("node:path");
+  const { tmpdir } = require("node:os");
+  const { randomUUID } = require("node:crypto");
+  const dir = join(tmpdir(), `image-paste-default-export-${randomUUID()}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return { tempDir: dir, fs, join, mockReadClipboardImage: vi.fn() };
+});
+
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+  getAgentDir: () => tempDir,
+  convertToPng: () => undefined,
+}));
+
+vi.mock("./clipboard.js", () => ({
+  readClipboardImage: mockReadClipboardImage,
+  readClipboardFilePaths: vi.fn(async () => null),
+  readClipboardText: vi.fn(async () => null),
+  buildPathInsertion: vi.fn(),
+  clipboardTextForEditor: vi.fn(),
+}));
+
 const { runNativePasteRestore } = await import("./keybinding-offer.js");
 const defaultExport = (await import("./index.js")).default;
 
+type Handler = (...args: unknown[]) => unknown;
+
+interface SubmitResult {
+	action: string;
+	images?: unknown[];
+}
+
+/**
+ * One standalone session: a factory run of its own, with the handlers that run
+ * handed to pi. pi caches the extension MODULE and re-invokes the factory per
+ * session, so two of these are two sessions in one process (#156).
+ */
+function standaloneSession() {
+	const inserted: string[] = [];
+	const on = vi.fn();
+	const registerShortcut = vi.fn();
+	const pi = {
+		on,
+		registerShortcut,
+		registerMessageRenderer: vi.fn(),
+		sendMessage: vi.fn(),
+	} as any;
+	defaultExport(pi);
+
+	const ctx = {
+		hasUI: true,
+		ui: { notify: vi.fn(), pasteToEditor: (text: string) => inserted.push(text), getEditorText: () => "" },
+	};
+	const start = on.mock.calls.find((c: Array<unknown>) => c[0] === "session_start")?.[1] as Handler;
+	const shutdown = on.mock.calls.find((c: Array<unknown>) => c[0] === "session_shutdown")?.[1] as Handler;
+	const input = on.mock.calls.find((c: Array<unknown>) => c[0] === "input")?.[1] as Handler;
+	const press = registerShortcut.mock.calls[0]![1].handler as Handler;
+
+	return {
+		inserted,
+		/** Fire this session's `session_start`. */
+		start: () => start({}, ctx),
+		/** Fire this session's `session_shutdown`. */
+		shutdown: () => shutdown({}, ctx),
+		/** Press this session's paste shortcut. */
+		press: () => press(ctx),
+		/** Submit `text` through this session's `input` handler. */
+		submit: (text: string) => input({ text, source: "interactive" }) as Promise<SubmitResult>,
+	};
+}
+
 describe("image-paste default export (standalone factory)", () => {
+	beforeEach(() => {
+		fs.rmSync(join(tempDir, "settings.json"), { force: true });
+		mockReadClipboardImage.mockReset();
+		mockReadClipboardImage.mockResolvedValue({
+			bytes: new Uint8Array([1, 2, 3]),
+			mimeType: "image/png",
+		});
+	});
+
 	it("is a function that registers paste + per-session lifecycle on the pi extension", () => {
 		expect(typeof defaultExport).toBe("function");
 
@@ -37,19 +119,34 @@ describe("image-paste default export (standalone factory)", () => {
 		);
 	});
 
-	it("resets the per-session queue on session_start and clears it on shutdown", () => {
-		const on = vi.fn();
-		const pi = { on, registerShortcut: vi.fn(), registerMessageRenderer: vi.fn() } as any;
-		defaultExport(pi);
+	it("a session's shutdown clears its OWN queue and leaves another session's intact", async () => {
+		// #156: pi caches the module and re-runs the factory per session, so the
+		// lifecycle handlers of two sessions coexist in one process. The old
+		// module-level state meant a child's `session_shutdown` cleared the MAIN
+		// session's queue (dead paste key, silently) and a child's
+		// `session_start` replaced it (the queued image never attached). Both
+		// halves are asserted here through the standalone wiring; the same
+		// guarantee through the named export is in session-isolation.test.ts.
+		const main = standaloneSession();
+		await main.start();
+		await main.press(); // main's queue now holds "[Image #1]"
+		expect(main.inserted).toEqual(["[Image #1] "]);
 
-		const startHandler = on.mock.calls.find((c: Array<unknown>) => c[0] === "session_start")?.[1];
-		const shutdownHandler = on.mock.calls.find((c: Array<unknown>) => c[0] === "session_shutdown")?.[1];
-		expect(typeof startHandler).toBe("function");
-		expect(typeof shutdownHandler).toBe("function");
+		const child = standaloneSession();
+		await child.start();
+		await child.shutdown();
 
-		// Must not throw when wired to a session context
-		expect(() => (startHandler as (...a: unknown[]) => unknown)({}, { hasUI: true })).not.toThrow();
-		expect(() => (shutdownHandler as (...a: unknown[]) => unknown)({}, {})).not.toThrow();
+		// The main session's queue survived the child's teardown: its shortcut
+		// reaches the clipboard again rather than returning at the `!queue` guard.
+		await main.press();
+		expect(mockReadClipboardImage).toHaveBeenCalledTimes(2);
+		expect(main.inserted).toEqual(["[Image #1] ", "[Image #2] "]);
+
+		// …and both queued images still attach on the main session's submit — the
+		// child's session_start did not orphan the first one.
+		const result = await main.submit("[Image #1] and [Image #2] look");
+		expect(result.action).toBe("transform");
+		expect(result.images).toHaveLength(2);
 	});
 });
 

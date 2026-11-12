@@ -113,6 +113,7 @@ Docs follow the skill-suite layout (`specify`/`finish` conventions):
 ### Event Handlers
 - Register `session_shutdown` handlers at the top level of `register()`, NOT inside `session_start`
 - Nested registration causes handler accumulation on `/reload`
+- Never keep per-session state at module scope. Pi caches an extension module per process and re-invokes its factory with a fresh `pi` per session, so a module-scope `let`/`var` belongs to the process — and a `session_shutdown` belonging to ANOTHER session (a subordinate in-process session, e.g. a third-party subagent child) will clear the live session's state, silently (#156). Keep it in the `register()` closure; if a top-level handler must reach it, key a `const` Map by `ctx.sessionManager.getSessionId()`. Guard: `packages/core/src/session-state-discipline.test.ts`; rule: `docs/features/session-state.md`
 
 ### Source Files
 - Pi loads `.ts` files directly — publish `src/` in `"files"` field

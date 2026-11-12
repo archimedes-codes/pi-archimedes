@@ -68,9 +68,7 @@ vi.mock("@pi-archimedes/session-name", () => ({ registerSessionName: vi.fn() }))
 vi.mock("@pi-archimedes/sudo", () => ({ registerSudo: vi.fn() }));
 vi.mock("@pi-archimedes/diff", () => ({ registerDiffTools: vi.fn() }));
 vi.mock("@pi-archimedes/image-paste", () => ({
-  registerImagePaste: vi.fn(),
-  shutdownImagePaste: vi.fn(),
-  initImagePasteSession: vi.fn(),
+  registerImagePaste: vi.fn(() => ({ initSession: vi.fn(), shutdown: vi.fn() })),
 }));
 vi.mock("@pi-archimedes/image-paste/keybinding-offer", () => ({
   offerKeybindingFix: vi.fn(async () => false),
