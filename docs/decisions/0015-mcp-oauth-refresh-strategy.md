@@ -1,4 +1,4 @@
-# ADR 0001: MCP OAuth token refresh strategy
+# MCP OAuth token refresh strategy
 
 **Status:** Accepted
 **Date:** 2026-08-17

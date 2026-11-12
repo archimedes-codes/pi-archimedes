@@ -1,4 +1,4 @@
-# ADR 0005: MCP panel authentication uses in-panel UX over the shared loader
+# MCP panel authentication uses in-panel UX over the shared loader
 
 **Status:** Accepted
 **Date:** 2026-08-19

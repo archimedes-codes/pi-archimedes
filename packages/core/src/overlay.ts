@@ -6,7 +6,8 @@
  *
  * All terminal-width maths here is delegated to `@earendil-works/pi-tui`:
  * `visibleWidth` for measurement, `truncateToWidth` for cutting and padding,
- * `wrapTextWithAnsi` for word wrapping. `docs/tui.md` asks for exactly that,
+ * `wrapTextWithAnsi` for word wrapping. pi's own `docs/tui.md` — shipped in
+ * `@earendil-works/pi-coding-agent`, not this repo — asks for exactly that,
  * and a local re-implementation cannot be right: measuring `.length` after
  * stripping only `\x1b[…m` counts pi's `CURSOR_MARKER` (an APC sequence) as
  * seven drawn columns, counts an OSC 8 hyperlink's URL as drawn text, and
