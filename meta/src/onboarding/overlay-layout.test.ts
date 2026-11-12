@@ -91,5 +91,31 @@ describe("onboarding plugin row layout", () => {
         `frame ${frame}: the label field does not end on a blank column, so the description is drawn flush against the label: ${JSON.stringify(collided)}`,
       ).toEqual([]);
     });
+
+    it(`gives the description every column the border allocates for it at frame ${frame}`, () => {
+      // The content cell the border allocates, minus this row's 5 chrome columns
+      // and the 16-column label field.
+      const budget = borderContentWidth(frame) - DESC_START;
+      const drawn = pluginRows(frame).map((line) =>
+        visibleWidth(line.slice(DESC_START).trimEnd()),
+      );
+
+      // Upper bound: nothing is drawn wider than the cell (the clip would hide it).
+      const over = drawn.filter((columns) => columns > budget);
+      expect(
+        over,
+        `frame ${frame}: descriptions drawn wider than the ${budget}-column budget: ${over.join(",")}`,
+      ).toEqual([]);
+
+      // Lower bound — the half `wrapWithBorder` makes invisible. Padding short rows
+      // up is what lets a caller that under-sized its rows pass a frame-width audit,
+      // so an upper bound alone is a toothless guard: without this, sizing every row
+      // to `width - 20` measures frame-perfect and passes.
+      const filled = drawn.filter((columns) => columns === budget).length;
+      expect(
+        filled,
+        `frame ${frame}: no row fills the ${budget}-column budget (drawn ${drawn.join(",")}) — the capture is not crowded, so this assertion proves nothing`,
+      ).toBeGreaterThan(0);
+    });
   }
 });

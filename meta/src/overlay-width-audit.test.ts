@@ -8,6 +8,13 @@
  * it to land on the frame. These are the surfaces `OVERLAY_CHROME` feeds, and
  * the cursor marker they emit is the shape the old `.length`-based width maths
  * measured far too wide — see Task 4 of the pi 1.x alignment plan.
+ *
+ * This audit measures bleed only: `wrapWithBorder` pads short rows up and
+ * truncates long ones (`packages/core/src/overlay.ts:94`), so every produced
+ * line lands on the frame whatever width the caller sized its rows to — an
+ * under-sized row is invisible here by construction. Row *layout* (does a field
+ * get the columns it asked for) is asserted in
+ * `onboarding/overlay-layout.test.ts`.
  */
 
 import { describe, it, expect, vi } from "vitest";

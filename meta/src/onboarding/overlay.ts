@@ -1,5 +1,6 @@
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import {
+  borderContentWidth,
   padEnd,
   renderFooter,
   renderHeader,
@@ -167,12 +168,18 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
 
   function render(width: number): string[] {
     const lines: string[] = [];
-    lines.push(renderHeader(" Welcome to pi-archimedes ", width - 2, theme));
-    lines.push(padEnd(`Set up your preferences · ${activeStep + 1}/4`, width - 2));
-    lines.push(padEnd("Choices apply from your next session.", width - 2));
+    // Every row is laid out to the cell `wrapWithBorder` actually allocates
+    // (see docs/decisions/0017): sizing rows to the frame minus the two border
+    // glyphs instead asks for two columns more than exist, and the border's
+    // padEnd clips the excess — the frame audit stays green while the row
+    // silently loses columns.
+    const contentWidth = borderContentWidth(width);
+    lines.push(renderHeader(" Welcome to pi-archimedes ", contentWidth, theme));
+    lines.push(padEnd(`Set up your preferences · ${activeStep + 1}/4`, contentWidth));
+    lines.push(padEnd("Choices apply from your next session.", contentWidth));
 
     if (activeStep === 0) {
-      lines.push(padEnd("Thinking style", width - 2));
+      lines.push(padEnd("Thinking style", contentWidth));
       lines.push("");
       for (let i = 0; i < THINKING_OPTIONS.length; i++) {
         const opt = THINKING_OPTIONS[i];
@@ -180,15 +187,15 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const marker = i === (cursorByStep[0] ?? 0) ? "> " : "  ";
         lines.push(
           padEnd(
-            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, width - 14, "")}`,
-            width - 2,
+            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, contentWidth - 11, "")}`,
+            contentWidth,
           ),
         );
       }
       lines.push("");
-      lines.push(renderFooter(" [↑↓] move  [enter] next  [esc] finish ", width - 2, theme));
+      lines.push(renderFooter(" [↑↓] move  [enter] next  [esc] finish ", contentWidth, theme));
     } else if (activeStep === 1) {
-      lines.push(padEnd("Tool output style", width - 2));
+      lines.push(padEnd("Tool output style", contentWidth));
       lines.push("");
       for (let i = 0; i < TOOL_OPTIONS.length; i++) {
         const opt = TOOL_OPTIONS[i];
@@ -196,15 +203,15 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const marker = i === (cursorByStep[1] ?? 0) ? "> " : "  ";
         lines.push(
           padEnd(
-            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, width - 14, "")}`,
-            width - 2,
+            `${marker}${padEnd(opt.label, 9)}${truncateToWidth(opt.description, contentWidth - 11, "")}`,
+            contentWidth,
           ),
         );
       }
       lines.push("");
-      lines.push(renderFooter(" [↑↓] move  [enter] next  [esc] finish ", width - 2, theme));
+      lines.push(renderFooter(" [↑↓] move  [enter] next  [esc] finish ", contentWidth, theme));
     } else if (activeStep === 2) {
-      lines.push(padEnd("Which plugins do you want?", width - 2));
+      lines.push(padEnd("Which plugins do you want?", contentWidth));
       lines.push("");
       for (let i = 0; i < opts.plugins.length; i++) {
         const p = opts.plugins[i];
@@ -217,15 +224,15 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         const label = truncateToWidth(p.label, 15, "");
         lines.push(
           padEnd(
-            `${cursor} ${marker} ${padEnd(label, 16)}${truncateToWidth(p.description, width - 26, "")}`,
-            width - 2,
+            `${cursor} ${marker} ${padEnd(label, 16)}${truncateToWidth(p.description, contentWidth - 21, "")}`,
+            contentWidth,
           ),
         );
       }
       lines.push("");
-      lines.push(renderFooter(" [↑↓] move  [space] toggle  [enter] next  [esc] finish ", width - 2, theme));
+      lines.push(renderFooter(" [↑↓] move  [space] toggle  [enter] next  [esc] finish ", contentWidth, theme));
     } else {
-      lines.push(padEnd("Which spinner for the editor border?", width - 2));
+      lines.push(padEnd("Which spinner for the editor border?", contentWidth));
       lines.push("");
       for (let i = 0; i < opts.spinners.length; i++) {
         const name = opts.spinners[i] ?? "";
@@ -234,10 +241,10 @@ export function createOnboardingOverlay(opts: OnboardingOverlayOptions) {
         // Options render consecutively (no blank line between them): the 10
         // options must fit the overlay's 80% max height on a small terminal
         // (24 rows → ~19), so the per-option vertical spacing was dropped.
-        lines.push(padEnd(`${marker}${padEnd(name, 15)}${preview}`, width - 2));
+        lines.push(padEnd(`${marker}${padEnd(name, 15)}${preview}`, contentWidth));
       }
       lines.push("");
-      lines.push(renderFooter(" [↑↓] move  [enter] done  [esc] finish (skip rest) ", width - 2, theme));
+      lines.push(renderFooter(" [↑↓] move  [enter] done  [esc] finish (skip rest) ", contentWidth, theme));
     }
 
     return wrapWithBorder(lines, width, theme);
