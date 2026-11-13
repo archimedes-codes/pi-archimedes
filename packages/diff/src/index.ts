@@ -11,7 +11,6 @@ import { setConfigGetter as setShikiConfig } from "./shiki.js";
 import { setConfigGetter as setRenderConfig } from "./render/index.js";
 import { DiffComponent } from "./diff-component.js";
 import type { DiffBg, DiffColors } from "./ansi/index.js";
-import { resetDiffColors } from "./ansi/index.js";
 import { installWriteTool, installEditTool } from "./tools/index.js";
 import { diag } from "./log.js";
 import { reportPiSupport } from "./pi-support.js";
@@ -136,9 +135,6 @@ export function registerDiffTools(
 	reportPiSupport("diff", "1.2.0");
 
 	_readConfig = readConfig;
-
-	// Reset theme-derived colors so they are re-derived from the current theme
-	resetDiffColors();
 
 	// Wire config getters into submodules
 	setShikiConfig(() => getConfig());

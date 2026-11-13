@@ -19,7 +19,6 @@ import {
 	DEFAULT_DIFF_BG,
 	themeCacheKey,
 	resolveDiffColors,
-	resetDiffColors,
 } from "./codes.js";
 
 // ── Exported constants ──────────────────────────────────────────────────────
@@ -185,19 +184,16 @@ describe("themeCacheKey", () => {
 
 describe("resolveDiffColors", () => {
 	it("returns DEFAULT_DIFF_COLORS when no theme", () => {
-		resetDiffColors();
 		const result = resolveDiffColors(undefined);
 		expect(result).toEqual(DEFAULT_DIFF_COLORS);
 	});
 
 	it("returns DEFAULT_DIFF_COLORS when theme lacks getFgAnsi", () => {
-		resetDiffColors();
 		const result = resolveDiffColors({ fg: () => "" });
 		expect(result).toEqual(DEFAULT_DIFF_COLORS);
 	});
 
 	it("returns theme-derived colors when theme has getFgAnsi", () => {
-		resetDiffColors();
 		const theme = {
 			getFgAnsi: (token: string) => {
 				if (token === "toolDiffAdded") return "\x1b[38;2;50;200;50m";
@@ -218,7 +214,6 @@ describe("resolveDiffColors", () => {
 		// it (pre-0.99.0) substituted a colour where the theme had said "the
 		// terminal's own". Both readings agree on the fix: a terminal default is
 		// an answer, not a missing value.
-		resetDiffColors();
 		for (const token of ["", "\x1b[39m", "\x1b[0m"]) {
 			const result = resolveDiffColors({ getFgAnsi: () => token });
 			expect(result).toEqual({ fgAdd: token, fgDel: token, fgCtx: token });
@@ -226,7 +221,6 @@ describe("resolveDiffColors", () => {
 	});
 
 	it("substitutes the hardcoded fallback per token, only where the theme has no answer", () => {
-		resetDiffColors();
 		const theme = {
 			getFgAnsi: (token: string) => {
 				if (token === "toolDiffAdded") return "\x1b[38;2;50;200;50m";
@@ -242,44 +236,7 @@ describe("resolveDiffColors", () => {
 	});
 
 	it("keeps the hardcoded set for the no-theme-object path", () => {
-		resetDiffColors();
 		expect(resolveDiffColors(undefined)).toEqual(DEFAULT_DIFF_COLORS);
 		expect(resolveDiffColors({})).toEqual(DEFAULT_DIFF_COLORS);
-	});
-});
-
-// ── resetDiffColors ─────────────────────────────────────────────────────────
-
-describe("resetDiffColors", () => {
-	it("clears cache so subsequent call re-derives", () => {
-		const theme = {
-			getFgAnsi: (token: string) => {
-				if (token === "toolDiffAdded") return "\x1b[38;2;50;200;50m";
-				if (token === "toolDiffRemoved") return "\x1b[38;2;200;50;50m";
-				if (token === "toolDiffContext") return "\x1b[38;2;100;100;100m";
-				return "";
-			},
-		};
-
-		// First call derives colors
-		const result1 = resolveDiffColors(theme);
-		expect(result1.fgAdd).toBe("\x1b[38;2;50;200;50m");
-
-		// Reset clears cache
-		resetDiffColors();
-
-		// Now change the theme
-		const newTheme = {
-			getFgAnsi: (token: string) => {
-				if (token === "toolDiffAdded") return "\x1b[38;2;10;100;10m";
-				if (token === "toolDiffRemoved") return "\x1b[38;2;100;10;10m";
-				if (token === "toolDiffContext") return "\x1b[38;2;50;50;50m";
-				return "";
-			},
-		};
-
-		// After reset, new theme should be picked up
-		const result2 = resolveDiffColors(newTheme);
-		expect(result2.fgAdd).toBe("\x1b[38;2;10;100;10m");
 	});
 });

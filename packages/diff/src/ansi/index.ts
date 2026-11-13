@@ -7,7 +7,7 @@ export {
 	DEFAULT_DIFF_BG,
 	ANSI_RE, ANSI_CAPTURE_RE, ANSI_PARAM_CAPTURE_RE,
 	DEFAULT_DIFF_COLORS,
-	resetDiffColors, themeCacheKey, resolveDiffColors,
+	themeCacheKey, resolveDiffColors,
 	deriveBgFromTheme,
 	type DiffBg,
 	type DiffColors,
