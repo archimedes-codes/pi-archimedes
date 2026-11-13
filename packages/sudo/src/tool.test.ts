@@ -32,7 +32,7 @@ vi.mock("@pi-archimedes/core/bridge", () => ({
 	getBridge: () => bridgeState,
 }));
 
-import { buildSudoArgv, createSudoExecTool, probeSudoPassword, probeSudoTicket, scrubSecret } from "./tool.js";
+import { buildSudoArgv, CONFIRMATION_SKIPPED_MARKER, createSudoExecTool, probeSudoPassword, probeSudoTicket, scrubSecret } from "./tool.js";
 import type { SudoChild, SudoSpawner } from "./tool.js";
 import { credentialCache } from "./cache.js";
 
@@ -334,16 +334,16 @@ describe("sudo_exec tool", () => {
 	});
 
 	describe("confirmation while a credential is cached (ADR 0033)", () => {
-		// The bridge test below turns the bridge on; reset it so the rest of the
-		// file keeps exercising the TUI path (this describe is outside the
-		// bridge block that owns the existing afterEach).
+		// This block installs process.kill spies and turns the bridge on; reset both
+		// so the rest of the file keeps exercising the plain TUI path.
 		afterEach(() => {
+			vi.restoreAllMocks();
 			bridgeState.active = false;
 			bridgeState.confirm.mockReset();
 			bridgeState.password.mockReset();
 		});
 
-		it("confirms on every run by default, even with a cached credential, and records no skip", async () => {
+		it("confirms on every run by default, even with a cached credential, and the text stays byte-identical", async () => {
 			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
 			const tool = createSudoExecTool({ spawner });
 			credentialCache.set("cachedpw", 60_000);
@@ -352,10 +352,12 @@ describe("sudo_exec tool", () => {
 
 			expect(spies.confirmCalls).toHaveLength(1);
 			expect(spies.confirmCalls[0]?.message).toContain("id");
+			// the default path never carries the marker or the flag
+			expect((result.content[0] as { text: string }).text).toBe("ok\n");
 			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
 		});
 
-		it("skips the confirmation for a cached credential when confirmWhenCached is false, and says so in the details", async () => {
+		it("skips the confirmation for a cached credential when confirmWhenCached is false, in both channels", async () => {
 			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
 			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
 			const tool = createSudoExecTool({ spawner });
@@ -365,6 +367,8 @@ describe("sudo_exec tool", () => {
 
 			expect(spies.confirmCalls).toHaveLength(0); // no human click for a cached credential
 			expect(result.isError).toBeFalsy();
+			// the text is what the terminal and the model see; details is the session-file record
+			expect((result.content[0] as { text: string }).text).toBe(`${CONFIRMATION_SKIPPED_MARKER}\nok\n`);
 			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
 		});
 
@@ -373,7 +377,6 @@ describe("sudo_exec tool", () => {
 			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
 			const tool = createSudoExecTool({ spawner });
 			const spies = spiesNoPrompt();
-			spies.customCalls.length = 0;
 			const ui = {
 				confirm: (title: string, message: string) => {
 					spies.confirmCalls.push({ title, message });
@@ -393,7 +396,7 @@ describe("sudo_exec tool", () => {
 			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
 		});
 
-		it("marks a failed run that skipped the gate too", async () => {
+		it("marks a failed run that skipped the gate, and keeps the no-output case to the marker alone", async () => {
 			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
 			const { spawner } = makeFakeSpawner({ stdout: "", stderr: "boom\n", code: 7 });
 			const { authProbe, passwordProbe } = probeSpy(true);
@@ -403,9 +406,75 @@ describe("sudo_exec tool", () => {
 
 			expect(result.isError).toBe(true);
 			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+			expect((result.content[0] as { text: string }).text).toBe(CONFIRMATION_SKIPPED_MARKER);
 		});
 
-		it("applies the same rule in bridge mode: no Client confirm when the credential is cached", async () => {
+		it("a failing run on the default settings carries neither the marker nor the flag", async () => {
+			const { spawner } = makeFakeSpawner({ stdout: "", stderr: "boom\n", code: 7 });
+			const { authProbe, passwordProbe } = probeSpy(true);
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
+			credentialCache.set("cachedpw", 60_000);
+			const result = await run(tool, tuiCtxWithSpies(true, spiesNoPrompt()), { command: "false", reason: "check" });
+
+			expect(result.isError).toBe(true);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
+			expect((result.content[0] as { text: string }).text).toBe("");
+		});
+
+		it("marks a timed-out run that skipped the gate (kill path, not the command path)", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner, last } = makeFakeSpawner({ stderr: "", code: null, exitOn: "kill" });
+			vi.spyOn(process, "kill").mockImplementation((pid?: number) => {
+				if (pid === -4242) last.child.kill("SIGKILL");
+				return true;
+			});
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("pw", 60_000);
+
+			const result = await run(tool, tuiCtxWithSpies(true, spiesNoPrompt()), { command: "sleep", reason: "test", timeoutMs: 10 });
+
+			expect(result.isError).toBe(true);
+			expect((result.details as { exitCode: number; confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+			expect((result.content[0] as { text: string }).text.startsWith(CONFIRMATION_SKIPPED_MARKER)).toBe(true);
+		});
+
+		it("marks a transport failure that skipped the gate (spawner threw, no command ran)", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const tool = createSudoExecTool({
+				spawner: () => {
+					throw Object.assign(new Error("spawn sudo EACCES"), { code: "EACCES" });
+				},
+			});
+			credentialCache.set("pw", 60_000);
+
+			const result = await run(tool, tuiCtxWithSpies(true, spiesNoPrompt()), { command: "apt update", reason: "maintain" });
+
+			expect(result.isError).toBe(true);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+			expect((result.content[0] as { text: string }).text.startsWith(CONFIRMATION_SKIPPED_MARKER)).toBe(true);
+		});
+
+		it("marks the ambiguous-credential paths too: strike 1 keeps the warning after the marker, strike 2 clears", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({ stdout: "", stderr: "boom\n", code: 1 });
+			const { authProbe, passwordProbe } = probeSpy(false, false, false); // both probes non-terminal
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
+			credentialCache.set("pw", 60_000);
+			const ctx = tuiCtxWithSpies(true, spiesNoPrompt());
+
+			const first = await run(tool, ctx, { command: "false", reason: "strike one" });
+			const firstText = (first.content[0] as { text: string }).text;
+			expect(firstText.startsWith(`${CONFIRMATION_SKIPPED_MARKER}\n`)).toBe(true);
+			expect(firstText).toMatch(/WARNING/); // the warning keeps its place at the end
+			expect((first.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+
+			const second = await run(tool, ctx, { command: "false", reason: "strike two" });
+			expect(credentialCache.get()).toBeNull(); // the second strike cleared the cache
+			expect((second.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+			expect((second.content[0] as { text: string }).text).toMatch(/authentication failed/i);
+		});
+
+		it("applies the same rule in bridge mode: no Client confirm, and both channels still say so", async () => {
 			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
 			bridgeState.active = true;
 			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
@@ -413,12 +482,15 @@ describe("sudo_exec tool", () => {
 			credentialCache.set("cachedpw", 60_000);
 			const ui = { confirm: vi.fn(), custom: vi.fn() } as unknown as ExtensionContext["ui"];
 
-			await run(tool, { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext, {
+			const result = await run(tool, { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext, {
 				command: "id",
 				reason: "whoami",
 			});
 
 			expect(bridgeState.confirm).not.toHaveBeenCalled();
+			expect(result.isError).toBeFalsy();
+			expect((result.content[0] as { text: string }).text).toBe(`${CONFIRMATION_SKIPPED_MARKER}\nok\n`);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
 		});
 	});
 

@@ -33,11 +33,25 @@ export interface SudoExecDetails {
 	/**
 	 * Present and `true` only when the confirmation gate was skipped because a
 	 * credential was already cached (`archimedes.sudo.confirmWhenCached: false`,
-	 * ADR 0033). The command and reason are still in the tool call, so this flag
-	 * is the audit trail that says no human confirmed this particular run.
+	 * ADR 0033). This is the machine-readable record of the skipped gate in the
+	 * session file; `CONFIRMATION_SKIPPED_MARKER` is the same fact in the result
+	 * text, which is the half the terminal and the model actually see.
 	 */
 	confirmationSkipped?: boolean;
 }
+
+/**
+ * First line of a tool result whose confirmation gate was skipped (ADR 0033).
+ *
+ * It belongs in the result **text**, not only in `details`: this tool registers
+ * no result renderer, so the TUI fallback prints `content[].text` alone, and
+ * both provider transforms rebuild a tool result from `content`, dropping
+ * `details`. Without the line, a run nobody approved is word-for-word what an
+ * approved one looks like — to the human reading the transcript, and to the
+ * model deciding whether to issue the next privileged command.
+ */
+export const CONFIRMATION_SKIPPED_MARKER =
+	"[sudo] confirmation skipped — cached credential, archimedes.sudo.confirmWhenCached: false (no human confirmed this command)";
 
 // ── process plumbing ─────────────────────────────────────────────────────────
 
@@ -391,7 +405,7 @@ export function buildSudoArgv(command: string): string[] {
 
 const SUDO_EXEC_DESCRIPTION = `Run a command with elevated privileges using sudo.
 
-- BEFORE any credential is requested, the exact command and its reason are shown to the user for confirmation.
+- BEFORE any credential is requested, the exact command and its reason are shown to the user for confirmation. The one exception is user configuration: with \`archimedes.sudo.confirmWhenCached: false\`, a command whose credential is already cached runs without that confirmation, and the result text starts with a line saying so.
 - The password is entered only through a masked UI, passed to sudo via stdin, cached in memory for the session, and never exposed.
 - Use this instead of sudo in bash — interactive sudo in bash is blocked.
 - The command is executed as argv, NOT through a shell: no pipes, redirects, &&, ;, or env assignments; pass args space-separated, quote only literal args.`;
@@ -503,9 +517,26 @@ export function createSudoExecTool(options: {
 			// changed here, and a cache miss still confirms and prompts.
 			let credential = credentialCache.get();
 			const confirmationSkipped = credential !== null && config.confirmWhenCached === false;
-			/** Attach the gate provenance to a result produced after the gate. */
-			const gated = <T extends { details: SudoExecDetails }>(result: T): T =>
-				confirmationSkipped ? { ...result, details: { ...result.details, confirmationSkipped: true } } : result;
+			/**
+			 * Attach the gate provenance to a result produced after the gate: the
+			 * flag for the session file, and the marker line in front of the text —
+			 * which is the half a human in the terminal and the model actually see.
+			 * Prefixing keeps every existing suffix (the unverified-credential
+			 * warning) exactly where it read before.
+			 */
+			const gated = <T extends { content: Array<{ type: "text"; text: string }>; details: SudoExecDetails }>(result: T): T => {
+				if (!confirmationSkipped) return result;
+				const text = result.content[0]?.text ?? "";
+				return {
+					...result,
+					// A failed command with no stdout gets the marker alone — not a
+					// marker plus an empty line the terminal then renders as a gap.
+					content: [
+						{ type: "text" as const, text: text ? `${CONFIRMATION_SKIPPED_MARKER}\n${text}` : CONFIRMATION_SKIPPED_MARKER },
+					],
+					details: { ...result.details, confirmationSkipped: true },
+				};
+			};
 			if (!confirmationSkipped) {
 				const confirmed = await confirmCommand(ctx, command, reason);
 				if (!confirmed) {
