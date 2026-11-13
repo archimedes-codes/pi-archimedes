@@ -6,7 +6,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import * as Ansi from "./ansi/index.js";
 import type { DiffBg, DiffColors } from "./ansi/index.js";
 import { DEFAULT_DIFF_COLORS, DEFAULT_DIFF_BG, deriveBgFromTheme } from "./ansi/index.js";
-import { renderSplitLines, MAX_RENDER_LINES } from "./render/index.js";
+import { renderSplitLines, MAX_RENDER_LINES, type DiffRenderConfig } from "./render/index.js";
 import type { ParsedDiff } from "./core/diff.js";
 
 // ---------------------------------------------------------------------------
@@ -31,9 +31,10 @@ import type { ParsedDiff } from "./core/diff.js";
  *
  * ```ts
  * renderResult(result, options, theme, context) {
+ *   const cfg = readConfig();
  *   const d = result.details;
  *   if (d?._type === "diff") {
- *     const comp = context.lastComponent ?? new DiffComponent(d.diff, d.language, theme);
+ *     const comp = context.lastComponent ?? new DiffComponent(d.diff, d.language, theme, cfg);
  *     return comp;
  *   }
  * }
@@ -43,6 +44,8 @@ export class DiffComponent implements Component {
 	private diff: ParsedDiff;
 	private language: BundledLanguage | undefined;
 	private theme: Theme;
+	/** The config the row was registered with — never read from module state. */
+	private config: DiffRenderConfig;
 	private maxLines: number;
 
 	/** Box wrapper with base background — makes the diff self-contained. */
@@ -64,11 +67,13 @@ export class DiffComponent implements Component {
 		diff: ParsedDiff,
 		language: BundledLanguage | undefined,
 		theme: Theme,
+		config: DiffRenderConfig,
 		maxLines: number = MAX_RENDER_LINES,
 	) {
 		this.diff = diff;
 		this.language = language;
 		this.theme = theme;
+		this.config = config;
 		this.maxLines = maxLines;
 
 		// Box provides base background so the diff is self-contained.
@@ -122,6 +127,7 @@ export class DiffComponent implements Component {
 			this.diff,
 			this.language,
 			width,
+			this.config,
 			this.maxLines,
 			dc,
 			dbg,

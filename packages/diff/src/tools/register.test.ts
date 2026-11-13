@@ -18,6 +18,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { installEditTool } from "./edit.js";
 import { installWriteTool } from "./write.js";
+import type { DiffRenderConfig } from "../render/index.js";
+
+/**
+ * The config reader both installers now take as their last argument (#163): it
+ * is captured by the rows each registration builds, never parked in module
+ * state where a second session could re-point it.
+ */
+const cfg = (): DiffRenderConfig => ({
+  diffTheme: "github-dark",
+  diffSplitMinWidth: 150,
+  diffSplitMinCodeWidth: 60,
+  diffSplitWrapCheck: true,
+});
 
 /** A `pi` handle that records what was registered. */
 function fakePi() {
@@ -69,7 +82,7 @@ const emit = (
 describe("edit registration", () => {
   it("registers no tool and resolves only `edit`", () => {
     const { pi, renderers, registered } = fakePi();
-    installEditTool(pi, "/work", "/home");
+    installEditTool(pi, "/work", "/home", cfg);
 
     expect(registered).toHaveLength(0);
     expect(renderers).toHaveLength(1);
@@ -79,7 +92,7 @@ describe("edit registration", () => {
 
   it("keeps the built-in's own renderShell while replacing the renderers", () => {
     const { pi, renderers } = fakePi();
-    installEditTool(pi, "/work", "/home");
+    installEditTool(pi, "/work", "/home", cfg);
 
     const { result } = resolve(renderers[0], "edit");
     expect(typeof result.renderCall).toBe("function");
@@ -92,7 +105,7 @@ describe("edit registration", () => {
     const { dir, file, done } = makeWorkspace("one\ntwo\nthree\n");
     try {
       const { pi, handlers } = fakePi();
-      installEditTool(pi, dir, dir);
+      installEditTool(pi, dir, dir, cfg);
       writeFileSync(file, "one\n2\nthree\n");
 
       const out = emit(handlers, "tool_result", {
@@ -117,7 +130,7 @@ describe("edit registration", () => {
     const { dir, file, done } = makeWorkspace();
     try {
       const { pi, handlers } = fakePi();
-      installEditTool(pi, dir, dir);
+      installEditTool(pi, dir, dir, cfg);
 
       const out = emit(handlers, "tool_result", {
         type: "tool_result",
@@ -146,7 +159,7 @@ describe("edit registration", () => {
     const { dir, file, done } = makeWorkspace();
     try {
       const { pi, handlers } = fakePi();
-      installEditTool(pi, dir, dir);
+      installEditTool(pi, dir, dir, cfg);
 
       const out = emit(handlers, "tool_result", {
         type: "tool_result",
@@ -168,7 +181,7 @@ describe("edit registration", () => {
 describe("write registration", () => {
   it("registers no tool and resolves only `write`", () => {
     const { pi, renderers, registered } = fakePi();
-    installWriteTool(pi, "/work", "/home", Text as any);
+    installWriteTool(pi, "/work", "/home", Text as any, cfg);
 
     expect(registered).toHaveLength(0);
     expect(resolve(renderers[0], "write").result?.renderShell).toBe("default");
@@ -179,7 +192,7 @@ describe("write registration", () => {
     const { dir, file, done } = makeWorkspace("one\ntwo\n");
     try {
       const { pi, handlers } = fakePi();
-      installWriteTool(pi, dir, dir, Text as any);
+      installWriteTool(pi, dir, dir, Text as any, cfg);
 
       emit(handlers, "tool_call", {
         type: "tool_call",
@@ -210,7 +223,7 @@ describe("write registration", () => {
     try {
       const fresh = path.join(dir, "fresh.txt");
       const { pi, handlers } = fakePi();
-      installWriteTool(pi, dir, dir, Text as any);
+      installWriteTool(pi, dir, dir, Text as any, cfg);
 
       emit(handlers, "tool_call", {
         type: "tool_call",
@@ -239,7 +252,7 @@ describe("write registration", () => {
     const { dir, file, done } = makeWorkspace("same\n");
     try {
       const { pi, handlers } = fakePi();
-      installWriteTool(pi, dir, dir, Text as any);
+      installWriteTool(pi, dir, dir, Text as any, cfg);
 
       emit(handlers, "tool_call", {
         type: "tool_call",

@@ -15,6 +15,15 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { installWriteTool } from "./write.js";
+import type { DiffRenderConfig } from "../render/index.js";
+
+/** The config the rows read — now threaded per registration rather than held per module (#163). */
+const DIFF_TEST_CONFIG: DiffRenderConfig = {
+  diffTheme: "github-dark",
+  diffSplitMinWidth: 150,
+  diffSplitMinCodeWidth: 60,
+  diffSplitWrapCheck: true,
+};
 
 // `diff` is standalone and must not import `@pi-archimedes/core` (see
 // `src/pi-support.ts`), so the tests strip escape sequences themselves.
@@ -41,6 +50,7 @@ function captureTool(cwd: string, home: string) {
     cwd,
     home,
     Text as any,
+    () => DIFF_TEST_CONFIG,
   );
   return resolved;
 }

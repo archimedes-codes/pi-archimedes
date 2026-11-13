@@ -12,6 +12,7 @@ import {
 	MAX_RENDER_LINES,
 	WORD_DIFF_MIN_SIM,
 	DEFAULT_TERM_WIDTH,
+	type DiffRenderConfig,
 	adaptiveWrapRows,
 	wrapAnsi,
 } from "./shared.js";
@@ -27,11 +28,12 @@ import {
 export async function renderUnified(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
+	cfg: DiffRenderConfig,
 	max = MAX_RENDER_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 ): Promise<string> {
 	const width = process.stdout.columns ?? DEFAULT_TERM_WIDTH;
-	const lines = await renderUnifiedLines(diff, language, width, max, dc, DEFAULT_DIFF_BG);
+	const lines = await renderUnifiedLines(diff, language, width, cfg, max, dc, DEFAULT_DIFF_BG);
 	return lines.join("\n");
 }
 
@@ -39,6 +41,7 @@ export async function renderUnifiedLines(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
 	width: number,
+	cfg: DiffRenderConfig,
 	max = MAX_RENDER_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 	dbg: DiffBg = DEFAULT_DIFF_BG,
@@ -61,7 +64,7 @@ export async function renderUnifiedLines(
 		if (l.type === "ctx" || l.type === "add") newSrc.push(l.content);
 	}
 	const [oldHL, newHL] = canHL
-		? await Promise.all([hlBlock(oldSrc.join("\n"), language), hlBlock(newSrc.join("\n"), language)])
+		? await Promise.all([hlBlock(oldSrc.join("\n"), language, cfg.diffTheme), hlBlock(newSrc.join("\n"), language, cfg.diffTheme)])
 		: [oldSrc, newSrc];
 
 	let oI = 0, nI = 0, idx = 0;

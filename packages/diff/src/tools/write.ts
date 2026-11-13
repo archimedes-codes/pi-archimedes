@@ -8,7 +8,7 @@ import * as Ansi from "../ansi/index.js";
 import { themeCacheKey } from "../ansi/index.js";
 import { lang, hlBlock } from "../shiki.js";
 import { DiffComponent } from "../diff-component.js";
-import { MAX_RENDER_LINES } from "../render/index.js";
+import { MAX_RENDER_LINES, type DiffRenderConfig } from "../render/index.js";
 
 /**
  * The content a `write` call displaces, read while the call is still about to
@@ -67,11 +67,14 @@ export function createWriteRenderers(
 	cwd: string,
 	home: string,
 	TextComponent: new (text?: string, paddingX?: number, paddingY?: number) => Component,
+	readConfig: () => DiffRenderConfig,
 ): ToolRenderers {
 	const sp = (p: string) => Ansi.shortPath(cwd, home, p);
 
 	return {
 		renderCall(args: any, theme: any, ctx: any) {
+			// Once per invocation — see the same note in `edit.ts` (#163).
+			const cfg = readConfig();
 			const fp = args?.path ?? args?.file_path ?? "";
 			const isNew = !fp || !existsSync(fp);
 			const label = isNew ? "create" : "write";
@@ -90,7 +93,7 @@ export function createWriteRenderers(
 					ctx.state._previewKey = previewKey;
 					ctx.state._previewText = hdr;
 					const lg = lang(fp);
-					hlBlock(args.content, lg)
+					hlBlock(args.content, lg, cfg.diffTheme)
 						.then((lines: string[]) => {
 							if (ctx.state._previewKey !== previewKey) return;
 							const maxShow = ctx.expanded ? lines.length : 16;
@@ -112,6 +115,7 @@ export function createWriteRenderers(
 		},
 
 		renderResult(result: any, _opt: any, theme: any, ctx: any) {
+			const cfg = readConfig();
 			const text = ctx.lastComponent ?? new TextComponent("", 0, 0);
 			if (ctx.isError) {
 				const e = result.content
@@ -125,7 +129,7 @@ export function createWriteRenderers(
 			if (d?._type === "diff") {
 				const comp = ctx.lastComponent instanceof DiffComponent
 					? ctx.lastComponent
-					: new DiffComponent(d.diff, d.language, theme, MAX_RENDER_LINES);
+					: new DiffComponent(d.diff, d.language, theme, cfg, MAX_RENDER_LINES);
 				return comp;
 			}
 			if (d?._type === "noChange") {
@@ -140,7 +144,7 @@ export function createWriteRenderers(
 					ctx.state._nft = `  ${theme.fg("success", `✓ new file (${lineCount} lines)`)}`;
 					const lg = lang(fp);
 					if (rawContent) {
-						hlBlock(rawContent, lg)
+						hlBlock(rawContent, lg, cfg.diffTheme)
 							.then((hlLines: string[]) => {
 								if (ctx.state._nfk !== pk) return;
 								const maxShow = ctx.expanded ? hlLines.length : 12;
@@ -178,8 +182,9 @@ export function installWriteTool(
 	cwd: string,
 	home: string,
 	TextComponent: new (text?: string, paddingX?: number, paddingY?: number) => Component,
+	readConfig: () => DiffRenderConfig,
 ): void {
-	const renderers = createWriteRenderers(cwd, home, TextComponent);
+	const renderers = createWriteRenderers(cwd, home, TextComponent, readConfig);
 	pi.registerToolRenderer((toolName, next) =>
 		toolName === "write" ? { ...next(), ...renderers } : next(),
 	);

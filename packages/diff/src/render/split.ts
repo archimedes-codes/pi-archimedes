@@ -13,6 +13,7 @@ import {
 	MAX_RENDER_LINES,
 	WORD_DIFF_MIN_SIM,
 	DEFAULT_TERM_WIDTH,
+	type DiffRenderConfig,
 	adaptiveWrapRows,
 	wrapAnsi,
 	shouldUseSplit,
@@ -30,11 +31,12 @@ import { renderUnifiedLines } from "./unified.js";
 export async function renderSplit(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
+	cfg: DiffRenderConfig,
 	max = MAX_PREVIEW_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 ): Promise<string> {
 	const width = process.stdout.columns ?? DEFAULT_TERM_WIDTH;
-	const lines = await renderSplitLines(diff, language, width, max, dc, DEFAULT_DIFF_BG);
+	const lines = await renderSplitLines(diff, language, width, cfg, max, dc, DEFAULT_DIFF_BG);
 	return lines.join("\n");
 }
 
@@ -42,6 +44,7 @@ export async function renderSplitLines(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
 	width: number,
+	cfg: DiffRenderConfig,
 	max = MAX_PREVIEW_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
 	dbg: DiffBg = DEFAULT_DIFF_BG,
@@ -49,7 +52,7 @@ export async function renderSplitLines(
 	const rst = dbg.rst;
 	const bgBase = dbg.bgBase;
 
-	if (!shouldUseSplit(diff, width, max)) return renderUnifiedLines(diff, language, width, max, dc, dbg);
+	if (!shouldUseSplit(diff, width, cfg, max)) return renderUnifiedLines(diff, language, width, cfg, max, dc, dbg);
 	if (!diff.lines.length) return [];
 
 	type Row = { left: DiffLine | null; right: DiffLine | null };
@@ -80,7 +83,7 @@ export async function renderSplitLines(
 		if (r.right && r.right.type !== "sep") rightSrc.push(r.right.content);
 	}
 	const [leftHL, rightHL] = canHL
-		? await Promise.all([hlBlock(leftSrc.join("\n"), language), hlBlock(rightSrc.join("\n"), language)])
+		? await Promise.all([hlBlock(leftSrc.join("\n"), language, cfg.diffTheme), hlBlock(rightSrc.join("\n"), language, cfg.diffTheme)])
 		: [leftSrc, rightSrc];
 
 	let lI = 0, rI = 0;

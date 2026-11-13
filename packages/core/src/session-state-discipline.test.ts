@@ -117,12 +117,6 @@ const ALLOW_LIST: readonly AllowEntry[] = [
     reason:
       "The trigger the pending timer will fire, same mechanism and same deferral as notifyTimer: a foreign shutdown clears it and the live session's notification is lost. follow-up: tsk_9a0926e5-2d94-43bd-941a-ccf9ffe06bd7",
   },
-  {
-    file: "packages/diff/src/index.ts",
-    line: "let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;",
-    reason:
-      "Assigned at `:138` inside `registerDiffTools`, which the composed path re-runs on every `session_start` with an equivalent value, so a foreign session cannot leave this one reading another session's config — it re-points it to the same thing. Deferred. follow-up: tsk_7a7b2b7d-da43-4b56-b2c9-fccae1af0816",
-  },
 ];
 
 // ── Walking the tree ────────────────────────────────────────────────────────
@@ -660,7 +654,6 @@ describe("session-state discipline: no per-session state at module scope", () =>
   it("keeps the allow-list as small as the work that removes it", () => {
     expect(EXCUSED.map(format).sort()).toEqual(
       [
-        "packages/diff/src/index.ts:44 [module-scope binding assigned by a session handler] let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;",
         "packages/notify/src/index.ts:197 [module-scope binding assigned by a session handler] let notifyTimer: ReturnType<typeof setTimeout> | null = null;",
         "packages/notify/src/index.ts:198 [module-scope binding assigned by a session handler] let pendingTrigger: TriggerType | null = null;",
       ].sort(),

@@ -7,7 +7,7 @@ import { parseDiff } from "../core/diff.js";
 import * as Ansi from "../ansi/index.js";
 import { themeCacheKey } from "../ansi/index.js";
 import { lang } from "../shiki.js";
-import { MAX_PREVIEW_LINES } from "../render/index.js";
+import { MAX_PREVIEW_LINES, type DiffRenderConfig } from "../render/index.js";
 import { DiffComponent } from "../diff-component.js";
 
 interface EditOperation { oldText: string; newText: string }
@@ -75,13 +75,17 @@ export function editResultDetails(event: {
 }
 
 /** The Archimedes `edit` renderers, closed over the paths they shorten against. */
-export function createEditRenderers(cwd: string, home: string): ToolRenderers {
+export function createEditRenderers(cwd: string, home: string, readConfig: () => DiffRenderConfig): ToolRenderers {
 	const sp = (p: string) => Ansi.shortPath(cwd, home, p);
 
 	return {
 		renderShell: "self",
 
 		renderCall(args: any, theme: any, ctx: any) {
+			// Resolved once per invocation, not per row: the reader belongs to the
+			// session that registered this row, so it is captured here rather than
+			// read back out of module state (#163).
+			const cfg = readConfig();
 			const fp = args?.path ?? args?.file_path ?? "";
 			const operations = getEditOperations(args);
 
@@ -126,7 +130,7 @@ export function createEditRenderers(cwd: string, home: string): ToolRenderers {
 				const diff = diffs[0];
 				if (diff) {
 					shell.addChild(new Spacer(1));
-					shell.addChild(new DiffComponent(diff, lg, theme, MAX_PREVIEW_LINES));
+					shell.addChild(new DiffComponent(diff, lg, theme, cfg, MAX_PREVIEW_LINES));
 				}
 			} else {
 				const maxShown = Math.min(operations.length, 3);
@@ -139,7 +143,7 @@ export function createEditRenderers(cwd: string, home: string): ToolRenderers {
 						theme.fg("muted", `Edit ${i + 1}/${operations.length}`),
 						0, 0,
 					));
-					shell.addChild(new DiffComponent(diff, lg, theme, previewLines));
+					shell.addChild(new DiffComponent(diff, lg, theme, cfg, previewLines));
 				}
 				const remainder = operations.length - maxShown;
 				if (remainder > 0) {
@@ -213,8 +217,8 @@ export function createEditRenderers(cwd: string, home: string): ToolRenderers {
  * handlers per extension, so calling it from `session_start` would stack a
  * duplicate on every `/reload`.
  */
-export function installEditTool(pi: ExtensionAPI, cwd: string, home: string): void {
-	const renderers = createEditRenderers(cwd, home);
+export function installEditTool(pi: ExtensionAPI, cwd: string, home: string, readConfig: () => DiffRenderConfig): void {
+	const renderers = createEditRenderers(cwd, home, readConfig);
 	pi.registerToolRenderer((toolName, next) =>
 		toolName === "edit" ? { ...next(), ...renderers } : next(),
 	);

@@ -24,23 +24,10 @@ export const DEFAULT_TERM_WIDTH = 200;
 // ---------------------------------------------------------------------------
 
 export interface DiffRenderConfig {
+	diffTheme: string;
 	diffSplitMinWidth: number;
 	diffSplitMinCodeWidth: number;
 	diffSplitWrapCheck?: boolean;
-}
-
-export function getConfig(): DiffRenderConfig {
-	return typeof _getConfig === "function" ? _getConfig() : DEFAULT_CONFIG;
-}
-
-const DEFAULT_CONFIG: DiffRenderConfig = {
-	diffSplitMinWidth: 150,
-	diffSplitMinCodeWidth: 60,
-	diffSplitWrapCheck: true,
-};
-let _getConfig: (() => DiffRenderConfig) | undefined;
-export function setConfigGetter(fn: () => DiffRenderConfig): void {
-	_getConfig = fn;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,9 +96,8 @@ export function wrapAnsi(s: string, w: number, maxRows = adaptiveWrapRows(w), fi
 	return rows;
 }
 
-export function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINES): boolean {
+export function shouldUseSplit(diff: ParsedDiff, tw: number, cfg: DiffRenderConfig, maxRows = MAX_PREVIEW_LINES): boolean {
 	if (!diff.lines.length) return false;
-	const cfg = getConfig();
 	if (tw < cfg.diffSplitMinWidth) return false;
 
 	const nw = Math.max(2, String(Math.max(...diff.lines.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);

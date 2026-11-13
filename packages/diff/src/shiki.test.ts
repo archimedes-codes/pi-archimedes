@@ -15,7 +15,7 @@ vi.mock("./ansi/index.js", () => ({
 
 // ── Imports ──────────────────────────────────────────────────────────────────
 
-import { lang, setConfigGetter } from "./shiki.js";
+import { lang } from "./shiki.js";
 
 // ── lang ─────────────────────────────────────────────────────────────────────
 
@@ -231,33 +231,21 @@ describe("lang", () => {
 	});
 });
 
-// ── setConfigGetter ──────────────────────────────────────────────────────────
+// ── hlBlock ──────────────────────────────────────────────────────────────────
 
-describe("setConfigGetter", () => {
-	it("changes the config getter", async () => {
-		// Import hlBlock to test config getter effect
+// The theme used to arrive through a module-scope config getter that these tests
+// re-pointed; `hlBlock` now takes it directly (#163), so the two cases that
+// exercised real highlighting survive as explicit-theme calls.
+describe("hlBlock", () => {
+	it("returns an array of lines for a highlighted block", async () => {
 		const { hlBlock } = await import("./shiki.js");
-
-		setConfigGetter(() => ({ diffTheme: "github-light" }));
-
-		// The config getter should now return the new theme
-		// We can't directly inspect _getConfig, but we can verify hlBlock
-		// doesn't throw and uses the new config
-		const result = await hlBlock("const x = 1;", "javascript");
+		const result = await hlBlock("const x = 1;", "javascript", "github-dark");
 		expect(Array.isArray(result)).toBe(true);
 	});
 
-	it("accepts custom theme", async () => {
-		setConfigGetter(() => ({ diffTheme: "nord" }));
-
+	it("highlights a second language under its own theme", async () => {
 		const { hlBlock } = await import("./shiki.js");
-		const result = await hlBlock("print('hello')", "python");
+		const result = await hlBlock("print('hello')", "python", "github-dark");
 		expect(Array.isArray(result)).toBe(true);
-	});
-
-	it("restores default behavior after setting", () => {
-		setConfigGetter(() => ({ diffTheme: "github-dark" }));
-		// Should not throw
-		expect(() => setConfigGetter(() => ({ diffTheme: "one-dark" }))).not.toThrow();
 	});
 });
