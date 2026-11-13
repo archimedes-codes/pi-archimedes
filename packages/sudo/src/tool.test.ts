@@ -474,6 +474,33 @@ describe("sudo_exec tool", () => {
 			expect((second.content[0] as { text: string }).text).toMatch(/authentication failed/i);
 		});
 
+		it("an EXPIRED credential does not authorise a gate-free run — the gate and the prompt come back", async () => {
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			credentialCache.set("stale", 1); // expires immediately
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			const { spawner } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			const spies = spiesNoPrompt();
+			const ui = {
+				confirm: (title: string, message: string) => {
+					spies.confirmCalls.push({ title, message });
+					return Promise.resolve(true);
+				},
+				custom: (factory: unknown): Promise<string> => {
+					spies.customCalls.push(factory);
+					return Promise.resolve(""); // cancel the prompt: nothing runs
+				},
+			};
+			const ctx = { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext;
+
+			const result = await run(tool, ctx, { command: "id", reason: "whoami" });
+
+			// get() is expiry-aware, so an expired entry reads as "no credential"
+			expect(spies.confirmCalls).toHaveLength(1);
+			expect((result.content[0] as { text: string }).text).toMatch(/password entry cancelled/i);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
+		});
+
 		it("applies the same rule in bridge mode: no Client confirm, and both channels still say so", async () => {
 			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
 			bridgeState.active = true;
