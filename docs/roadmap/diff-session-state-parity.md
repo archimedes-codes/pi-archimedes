@@ -106,7 +106,8 @@ issue: https://github.com/archimedes-codes/pi-archimedes/issues/163
 - Test: `packages/diff/src/tools/edit.test.ts`
 - Test: `packages/diff/src/tools/write.test.ts`
 - Test: `packages/diff/src/tools/register.test.ts`
-- Test: `packages/diff/src/leak.test.ts` (new)
+- Test: `packages/diff/src/module-state.test.ts` (new — the red-first structural pin)
+- Test: `packages/diff/src/config-threading.test.ts` (new — leaf purity, written after the signatures exist)
 - Modify: `packages/core/src/session-state-discipline.test.ts`
 
 **What to implement:**
@@ -164,7 +165,7 @@ issue: https://github.com/archimedes-codes/pi-archimedes/issues/163
    	maxLines: number = MAX_RENDER_LINES,
    )
    ```
-   with `private config: DiffRenderConfig;` beside the existing private fields, assigned in the constructor. Its `renderSplitLines(this.diff, this.language, width, this.maxLines, dc, dbg)` call at `:121` becomes `(this.diff, this.language, width, this.config, this.maxLines, dc, dbg)`. Import the type from `./render/index.js` (it already imports `renderSplitLines, MAX_RENDER_LINES` from there). `_deriveColors`, `_cachedDc`, `_cachedDbg`, `invalidate()` and the `Box` shell are untouched.
+   with `private config: DiffRenderConfig;` beside the existing private fields, assigned in the constructor. Its `renderSplitLines(this.diff, this.language, width, this.maxLines, dc, dbg)` call at `:121` becomes `(this.diff, this.language, width, this.config, this.maxLines, dc, dbg)`. Import the type from `./render/index.js` (it already imports `renderSplitLines, MAX_RENDER_LINES` from there). `_deriveColors`, `_cachedDc`, `_cachedDbg`, `invalidate()` and the `Box` shell are untouched. Also fix the usage example in the class doc comment at `:36` — `new DiffComponent(d.diff, d.language, theme)` gains the `config` argument, so the documented example stays true (`tsc` will not catch a comment).
 
 6. **`packages/diff/src/tools/edit.ts` and `tools/write.ts` — the reader arrives here.**
    - `export function createEditRenderers(cwd: string, home: string, readConfig: () => DiffRenderConfig): ToolRenderers` and `export function installEditTool(pi: ExtensionAPI, cwd: string, home: string, readConfig: () => DiffRenderConfig): void`.
@@ -192,16 +193,24 @@ issue: https://github.com/archimedes-codes/pi-archimedes/issues/163
    - `packages/diff/src/render/shared.test.ts`: remove `setConfigGetter` and `getConfig` from the import (`:5-6`), delete the `beforeEach` at `:51-57`, and give every `shouldUseSplit(diff, N)` call the config it was previously installing: `:61`, `:88`, `:108` use `{ diffTheme: "github-dark", diffSplitMinWidth: 150, diffSplitMinCodeWidth: 60, diffSplitWrapCheck: true }`; `:68` the same object with `140` unchanged semantics (width 140 < 150 → false); `:81` uses `diffSplitMinWidth: 100, diffSplitMinCodeWidth: 60`; `:96` uses `diffSplitWrapCheck: true` with the long lines; `:100-104`'s block uses `diffSplitWrapCheck: false`. Keep every `toBe(...)` expectation identical.
    - `packages/diff/src/tools/edit.test.ts:33` and `write.test.ts:34`: add the reader as the next positional argument to `installEditTool` / `installWriteTool`; `edit.test.ts:188` becomes `createEditRenderers("/project", "/home", () => DIFF_TEST_CONFIG)`.
    - `packages/diff/src/tools/register.test.ts`: add the reader argument to the 5 `installEditTool(pi, …)` calls (`:72`, `:82`, `:95`, `:120`, `:149`) and the 4 `installWriteTool(pi, …)` calls (`:171`, `:182`, `:213`, `:242`). Define one `const cfg = () => ({ diffTheme: "github-dark", diffSplitMinWidth: 150, diffSplitMinCodeWidth: 60, diffSplitWrapCheck: true });` at the top of the file and pass it.
-   - **New** `packages/diff/src/leak.test.ts` — the regression pin this card exists for. Two `registerDiffTools` calls on two fake `pi` handles (copy the `fakePi()` helper shape from `src/register-diff-tools.test.ts:17-34`), first with a reader returning `{ diffTheme: "github-light", diffSplitMinWidth: 100, diffSplitMinCodeWidth: 30, diffSplitWrapCheck: false }`, second with `{ diffTheme: "dracula", diffSplitMinWidth: 400, diffSplitMinCodeWidth: 300, diffSplitWrapCheck: true }`. Assert, using `shouldUseSplit(parseDiff("a\nb\n", "a\nc\n"), 200, firstReader())`, that the first reader's config still yields `true` after the second registration, and that the first reader's call count advances when the first session's config is read again (i.e. the first reader is still reachable and is not shadowed). This test must fail on the pre-change tree and pass after.
+   - **New** `packages/diff/src/config-threading.test.ts` — the regression pin this card exists for, and the only test that distinguishes before from after. Drive it through **installed renderers**, not through leaf functions: a fake `pi` that collects every resolver, then resolves the way pi does (`let out = { renderShell: "default" }; for (const r of resolvers) out = r(toolName, () => out) ?? out;` — copy that resolution shape from `src/tools/register.test.ts:22-53`, and note that **both** installers push a resolver, so capturing the last one overwrites the `edit` resolver). Copy the `theme` stub from `src/tools/edit.test.ts:23-28` and a minimal ctx from `src/tools/edit.test.ts:56+` (`{ state: {}, outputPad: 1, argsComplete: true, lastComponent: undefined, invalidate: () => {}, isError: false, expanded: false }` — a **fresh** ctx per call, so the `ctx.state._pk` memo cannot short-circuit the row).
+     - Register session A with a counting reader: `() => { readsA++; return { diffTheme: "github-light", diffSplitMinWidth: 100, diffSplitMinCodeWidth: 30, diffSplitWrapCheck: false }; }`; render one `edit` row (`{ path, oldText: "const a = 1;\n", newText: "const b = 2;\n" }`) and record `readsA`.
+     - Register session B on a **different** fake `pi` handle with a different reader (`diffSplitMinWidth: 4000`, `diffTheme: "dracula"`).
+     - Render a **second new** `edit` row through **A's** resolvers and assert `expect(readsA).toBeGreaterThan(readsAfterFirst)`.
+     - **Do not** write this assertion against `shouldUseSplit(diff, 200, firstReader())` — passing a value straight to the leaf never touches the shared module holder, so it passes identically before and after and pins nothing.
+     - Verified red on the base tree: `readsA` stays `2`, failure reads `expected 2 to be greater than 2`. It goes green when the reader is captured per registration.
+   - **New** `packages/diff/src/module-state.test.ts` — a source-shape assertion that survives the refactor as a permanent guard: read every non-test `.ts` under `packages/diff/src` and assert no line matches `^\s*(export\s+)?(let|var)\s+_?(getConfig|_readConfig|_lastThemeKey)\b` and no file exports a `setConfigGetter`. Unlike the cross-package guard this one cannot be satisfied by moving an assignment one file away. `_TextComponent` and `_shikiReady` must stay allowed — they are honest process state.
    - `packages/core/src/session-state-discipline.test.ts`: delete the whole `AllowEntry` object for `packages/diff/src/index.ts` (`:120-126`) **and** the string `"packages/diff/src/index.ts:44 [module-scope binding assigned by a session handler] let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;"` from the `EXCUSED` expectation in the last `it` (`:663`). Leaving either one makes the hygiene test fail ("allow-list entry no longer matches").
 
 **Steps:**
-- [ ] Write `packages/diff/src/leak.test.ts` first, against the current tree, and run `npx vitest run packages/diff/src/leak.test.ts`.
-  - Expected: it FAILS (the second registration shadows the first reader). If it passes before any code change, the test is not pinning the bug — fix the test before continuing.
+- [ ] Write `packages/diff/src/config-threading.test.ts` first, against the current tree, and run `npx vitest run packages/diff/src/config-threading.test.ts`.
+  - Expected: it FAILS with `expected 2 to be greater than 2` (session A's reader stops firing once B registers). If it passes before any code change, the test is reaching the leaf instead of the installed row — see the "do not write it against `shouldUseSplit`" warning in step 8 — fix the test before continuing.
+- [ ] Write `packages/diff/src/module-state.test.ts` (the source-shape assertion) and run `npx vitest run packages/diff/src/module-state.test.ts`.
+  - Expected: it FAILS, naming `_readConfig` in `src/index.ts`, `_getConfig` in `src/shiki.ts` and `src/render/shared.ts`, and the `setConfigGetter` exports. That failure list is the task's own inventory.
 - [ ] Apply changes 1–7 (source), then run `npx tsc --noEmit` in `/home/daniel/Coding/Archimedes/pi-archimedes/packages/diff`.
   - Expected: errors naming the call sites in step 6–7 that still pass the old arity. Fix them; do not add default-valued parameters to hide an arity error.
 - [ ] Update the five test files listed in step 8, then run `npx vitest run packages/diff`.
-  - Expected: all green, including `leak.test.ts`. If a `shouldUseSplit` expectation flips, the config object was copied wrong — the assertions must be identical to before.
+  - Expected: all green, including `config-threading.test.ts` and `module-state.test.ts`. If a `shouldUseSplit` expectation flips, the config object was copied wrong — the assertions must be identical to before.
 - [ ] Run `npx vitest run packages/core/src/session-state-discipline.test.ts`.
   - Expected: 4 passed with the diff entry deleted. If it reports `packages/diff/src/index.ts:44` as a violation, `_readConfig` is still declared.
 - [ ] Run `npx vitest run packages/diff packages/core meta` from the repo root.
@@ -214,7 +223,7 @@ issue: https://github.com/archimedes-codes/pi-archimedes/issues/163
 
 **Acceptance criteria:**
 - [ ] `packages/diff` declares no `setConfigGetter`, no `getConfig`, and no module-scope `let`/`var` holding config, theme, or theme-key state.
-- [ ] Two `registerDiffTools` calls with different readers cannot change what the first session renders (`leak.test.ts` green).
+- [ ] Two `registerDiffTools` calls with different readers cannot change what the first session renders (`config-threading.test.ts` green, and red on the base tree with `expected 2 to be greater than 2`).
 - [ ] `registerDiffTools`'s signature and `DEFAULT_DIFF_CONFIG`'s shape are unchanged; `meta/src/session-isolation.test.ts` passes without edits.
 - [ ] `getDiffSettingsItems` requires its config argument and `meta/src/settings.ts:61` still compiles.
 - [ ] The guard's allow-list contains no `packages/diff` entry and the guard is green.
@@ -284,7 +293,7 @@ issue: https://github.com/archimedes-codes/pi-archimedes/issues/163
 - Modify: `docs/features/session-state.md`
 
 **What to implement:**
-- Front-matter: bump `last-verified` to the date this task runs and extend `verified-by` to name the new checks (`packages/diff/src/leak.test.ts` green and failing on the pre-change tree; the cross-module hop fixtures; the `/tmp` re-add probe from Task 3 step "prove the guard is not decorative"), and link `docs/research/diff-module-scope-config-holders.md` + issue #163 as the provenance.
+- Front-matter: bump `last-verified` to the date this task runs and extend `verified-by` to name the new checks (`packages/diff/src/config-threading.test.ts` green and red on the base tree; the cross-module hop fixtures; the `/tmp` re-add probe from Task 3 step "prove the guard is not decorative"), and link `docs/research/diff-module-scope-config-holders.md` + issue #163 as the provenance.
 - "What the guard checks, and where it is blind": state the rule as two intra-file hops **plus one module boundary for named imports** (aliases and barrel re-exports followed); keep `core/src/bridge/index.ts:160` → `bridge/events.ts:38` in the blind-spot list but re-label it as unreachable because the call is a namespace-member call (`events.onSessionStart(ctx)`), and add `meta/src/index.ts:162`'s dynamic `import()` of `@pi-archimedes/diff` as a second named wall.
 - Replace the "Three bindings are allow-listed today" sentence with the actual census after this change: four bindings on two cards — `notify`'s `notifyTimer`/`pendingTrigger` (`tsk_9a0926e5-2d94-43bd-941a-ccf9ffe06bd7`) and `ui`'s `frameTimer`/`revealTimer` (`tsk_00a5ad67-8bc1-42e4-b999-d75196ec37c2`).
 - Remove `diff/src/shiki.ts`, `diff/src/render/shared.ts`, `diff/src/ansi/codes.ts` from the "deliberately ignores … no session handler assigns them" list; those files no longer hold lifecycle-reachable bindings at all. `bridge/channel.ts`, footer's caches and `ui/src/thinking/theme.ts` stay in that list.

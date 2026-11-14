@@ -7,15 +7,6 @@ import type { BundledLanguage, BundledTheme } from "shiki";
 import { normalizeShikiContrast } from "./ansi/index.js";
 
 // ---------------------------------------------------------------------------
-// Config access
-// ---------------------------------------------------------------------------
-
-let _getConfig: () => { diffTheme: string } = () => ({ diffTheme: "github-dark" });
-export function setConfigGetter(fn: () => { diffTheme: string }): void {
-	_getConfig = fn;
-}
-
-// ---------------------------------------------------------------------------
 // Language detection
 // ---------------------------------------------------------------------------
 
@@ -43,10 +34,10 @@ const MAX_HL_CHARS = 80_000;
 const CACHE_LIMIT = 192;
 
 let _shikiReady = false;
-async function ensureShiki(): Promise<void> {
+async function ensureShiki(theme: string): Promise<void> {
 	if (_shikiReady) return;
 	_shikiReady = true;
-	codeToANSI("", "typescript", _getConfig().diffTheme as BundledTheme).catch(() => {});
+	codeToANSI("", "typescript", theme as BundledTheme).catch(() => {});
 }
 
 const _cache = new Map<string, string[]>();
@@ -63,13 +54,12 @@ function _touch(k: string, v: string[]): string[] {
 	return v;
 }
 
-export async function hlBlock(code: string, language: BundledLanguage | undefined): Promise<string[]> {
+export async function hlBlock(code: string, language: BundledLanguage | undefined, theme: string): Promise<string[]> {
 	if (!code) return [""];
 	if (!language || code.length > MAX_HL_CHARS) return code.split("\n");
 
-	await ensureShiki();
+	await ensureShiki(theme);
 
-	const theme = _getConfig().diffTheme;
 	const k = `${theme}\0${language}\0${code}`;
 	const hit = _cache.get(k);
 	if (hit) return _touch(k, hit); // Promote to most-recently-used

@@ -56,9 +56,6 @@ export const DEFAULT_DIFF_BG: DiffBg = {
 	divider: `${FG_RULE}│\x1b[0m`,
 };
 
-// Theme cache key state — lives here since it's used by resolveDiffColors.
-let _lastThemeKey: string | undefined;
-
 // ---------------------------------------------------------------------------
 // Regex patterns
 // ---------------------------------------------------------------------------
@@ -83,11 +80,6 @@ export const DEFAULT_DIFF_COLORS: DiffColors = { fgAdd: FG_ADD, fgDel: FG_DEL, f
 // ---------------------------------------------------------------------------
 // Theme-aware color resolution
 // ---------------------------------------------------------------------------
-
-/** Reset auto-derived colors — call when theme changes. */
-export function resetDiffColors(): void {
-	_lastThemeKey = undefined;
-}
 
 export function themeCacheKey(theme?: any): string {
 	if (!theme?.fg) return "no-theme";
@@ -130,12 +122,6 @@ function themeFgAnsi(theme: any, token: string): string | undefined {
 }
 
 export function resolveDiffColors(theme?: any): DiffColors {
-	const themeKey = themeCacheKey(theme);
-
-	// Re-derive theme key cache (bg colors are now passed explicitly via DiffBg)
-	if (themeKey !== _lastThemeKey) {
-		_lastThemeKey = themeKey;
-	}
 	if (!theme?.getFgAnsi) return DEFAULT_DIFF_COLORS;
 	// Per token, so one unknown token cannot drag the whole row back to the
 	// hardcoded set.

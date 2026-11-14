@@ -7,11 +7,9 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, SettingItem } from "@earendil-works/pi-tui";
 
-import { setConfigGetter as setShikiConfig } from "./shiki.js";
-import { setConfigGetter as setRenderConfig } from "./render/index.js";
+import type { DiffRenderConfig } from "./render/index.js";
 import { DiffComponent } from "./diff-component.js";
 import type { DiffBg, DiffColors } from "./ansi/index.js";
-import { resetDiffColors } from "./ansi/index.js";
 import { installWriteTool, installEditTool } from "./tools/index.js";
 import { diag } from "./log.js";
 import { reportPiSupport } from "./pi-support.js";
@@ -27,12 +25,10 @@ export type { DiffBg, DiffColors } from "./ansi/index.js";
 // Config
 // ---------------------------------------------------------------------------
 
-export interface DiffConfig {
-	diffTheme: string;
-	diffSplitMinWidth: number;
-	diffSplitMinCodeWidth: number;
-	diffSplitWrapCheck?: boolean;
-}
+// The shape lives in the render layer (`render/shared.ts`), which is what
+// actually consumes it — aliased here so the public name survives and the shape
+// has exactly one declaration.
+export type DiffConfig = DiffRenderConfig;
 
 const DEFAULT_DIFF_CONFIG: DiffConfig = {
 	diffTheme: "github-dark",
@@ -41,15 +37,11 @@ const DEFAULT_DIFF_CONFIG: DiffConfig = {
 	diffSplitWrapCheck: true,
 };
 
-let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;
-function getConfig(): DiffConfig { return _readConfig(); }
-
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
-export function getDiffSettingsItems(overrideConfig?: DiffConfig): SettingItem[] {
-	const config = overrideConfig ?? getConfig();
+export function getDiffSettingsItems(config: DiffConfig): SettingItem[] {
 	return [
 		{
 			id: "diffTheme",
@@ -117,8 +109,10 @@ try {
  * builds a fresh extension and hands registration a new handle. A module-wide
  * flag would then install for the first session only, and every session after
  * it would get pi's native `edit`/`write` rows and none of the result details
- * the rows read. The theme and config readers are per-session, so those are
- * refreshed on every call.
+ * the rows read. The config reader is not module state: it is handed to the
+ * installers and captured by the rows they register, so a second call on an
+ * already-installed handle is a no-op and cannot re-point the first session's
+ * rows at another session's config (#163).
  */
 const _installedExtensions = new WeakSet<object>();
 
@@ -134,15 +128,6 @@ export function registerDiffTools(
 	// enabled package that registered nothing. Idempotent per package, and this
 	// runs again on every session_start.
 	reportPiSupport("diff", "1.2.0");
-
-	_readConfig = readConfig;
-
-	// Reset theme-derived colors so they are re-derived from the current theme
-	resetDiffColors();
-
-	// Wire config getters into submodules
-	setShikiConfig(() => getConfig());
-	setRenderConfig(() => getConfig());
 
 	// Already installed on this extension: re-registering would stack a duplicate
 	// resolver and handler set. A different handle is a different extension, so
@@ -168,8 +153,8 @@ export function registerDiffTools(
 	// The rows are chosen by pi's renderer resolution, and the result details
 	// each row reads arrive through `tool_result` (ADR 0029). Neither registers a
 	// tool, so pi's own `edit` and `write` stay in place.
-	installEditTool(pi, cwd, home);
-	installWriteTool(pi, cwd, home, _TextComponent);
+	installEditTool(pi, cwd, home, readConfig);
+	installWriteTool(pi, cwd, home, _TextComponent, readConfig);
 	_installedExtensions.add(pi);
 }
 

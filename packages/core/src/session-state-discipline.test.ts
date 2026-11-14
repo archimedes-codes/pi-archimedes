@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ── The rule (issue #156, docs/features/session-state.md) ───────────────────
@@ -22,10 +22,13 @@ import { fileURLToPath } from "node:url";
 // are the handlers pi fires per session, so anything they assign is per-session
 // state wearing process clothing.
 //
-// So the rule is TWO-HOP ASSIGNMENT REACHABILITY, intra-file:
+// So the rule is ASSIGNMENT REACHABILITY over three hops:
 //   hop 1  a module-scope `let`/`var` assigned inside such a handler body, or
 //   hop 2  assigned inside the body of a function that a handler body calls
-//          directly.
+//          directly, IN THE SAME FILE, or
+//   hop 3  assigned in ANOTHER FILE, inside the body of a function the handler
+//          body calls through a NAMED import (see blind spot 1 for what that
+//          excludes).
 // Hop 2 is mandatory, not thoroughness: #156's actual assignment was
 // `_queue = null` inside `shutdownQueue()`/`initImagePasteSession()`, one call
 // away from the handler. A one-hop rule reports green over the bug that shipped,
@@ -40,28 +43,40 @@ import { fileURLToPath } from "node:url";
 //
 // ── Blind spots, stated plainly: this is a BLIND SPOT, NOT COVERAGE ─────────
 //
-// 1. The rule is INTRA-FILE. It follows a handler body and the functions that
-//    body calls *in the same file*, so an assignment path that crosses a module
-//    boundary is invisible to it. Two such paths exist today and need no
-//    allow-list entry:
-//      - `core/src/bridge/index.ts:160`'s `session_start` handler calls
-//        `events.onSessionStart(ctx)`, and `events.ts:66` is where `sessionCtx`
-//        (`bridge/events.ts:38`) is written.
-//      - `ui/src/index.ts:183`'s `session_shutdown` handler calls
-//        `stopStartupListing()` at `:215`, which clears `frameTimer`/`revealTimer`
-//        declared at `ui/src/startup/index.ts:171-172`.
-//    Both are legitimate on their own merits — `events.stop()` is idempotent and
-//    generation-guarded by design, and the startup module's own comment explains
-//    why a module pair of timers cannot leak a second animation. But the guard
-//    is green there because it cannot see them, not because it checked. The
-//    moment any package moves an assignment one module boundary away from its
-//    handler, this file reports green over the bug.
+// 1. ONE IMPORT HOP, NAMED IMPORTS ONLY. The rule follows a handler body across
+//    exactly ONE module boundary: a function the handler calls by name that the
+//    file IMPORTS by name (`import { setConfigGetter } from "./shiki.js"`, with
+//    `as` aliases honoured and `import type` ignored), resolved through a barrel
+//    (`export { x } from "./other.js"`, also with renames, bounded so a cycle
+//    cannot hang the test) to the file that declares it. Inside that TARGET file
+//    the walk is transitive — the entry function plus anything it calls there.
+//    The hit is reported against the TARGET file and the target's declaration
+//    line, so an allow-list entry still pins `file + exact trimmed declaration`.
+//    Two walls remain, and both are deliberate:
+//      - NAMESPACE IMPORTS are not followed. `CALLS` cannot match `events.onSessionStart(ctx)`,
+//        and `import * as events` hands the resolver no symbol to look up, so
+//        `core/src/bridge/index.ts:160` → `core/src/bridge/events.ts:38`
+//        (`sessionCtx`) stays invisible. Following it would newly flag the five
+//        honest one-socket-per-process bindings in `core/src/bridge/` with no
+//        exemption category to put them in.
+//      - DYNAMIC `import()` is not followed: `meta/src/index.ts:162` reaching
+//        `@pi-archimedes/diff` from its own `session_start` stays invisible.
+//    The `NAMESPACE_IMPORT_NOT_FOLLOWED` fixture pins the first wall so widening
+//    it is an intentional edit rather than an accident. What this hop buys is
+//    concrete: `ui/src/index.ts:183`'s `session_shutdown` → `stopStartupListing()`
+//    at `:215` → `frameTimer`/`revealTimer` at `ui/src/startup/index.ts:171-172`
+//    is now a REAL hit that needs a REAL entry (it has two), not a green the
+//    guard grants because it cannot see.
 // 2. An assignment inside a closure a handler passes ELSEWHERE is not followed
 //    either — the callback is not a `pi.on` handler body. image-paste's
 //    `registerShortcut` callback assigned `_pasting` pre-fix and would not be
 //    reached by this rule on its own. That is precisely why the anti-vacuity
 //    fixture reproduces the shape that IS followed (a named function a handler
-//    calls) rather than the one that is not.
+//    calls) rather than the one that is not. Hop 3 respects this wall too: it
+//    collects the handler body's call surface with nested closures blanked, so a
+//    call made inside `ctx.ui.setFooter((…) => { render() { … } })` never starts
+//    one — which is what keeps the footer's git/jj/token-stat caches, named
+//    above as honest process state, out of the report.
 // 3. The assignment test is `name = …`. Compound and logical assignment
 //    (`count += 1`, `cache ||= …`) is not matched, and neither is a handler
 //    registered through anything other than a literal `pi.on("…")` call.
@@ -118,10 +133,16 @@ const ALLOW_LIST: readonly AllowEntry[] = [
       "The trigger the pending timer will fire, same mechanism and same deferral as notifyTimer: a foreign shutdown clears it and the live session's notification is lost. follow-up: tsk_9a0926e5-2d94-43bd-941a-ccf9ffe06bd7",
   },
   {
-    file: "packages/diff/src/index.ts",
-    line: "let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;",
+    file: "packages/ui/src/startup/index.ts",
+    line: "let frameTimer: ReturnType<typeof setInterval> | undefined;",
     reason:
-      "Assigned at `:138` inside `registerDiffTools`, which the composed path re-runs on every `session_start` with an equivalent value, so a foreign session cannot leave this one reading another session's config — it re-points it to the same thing. Deferred. follow-up: tsk_7a7b2b7d-da43-4b56-b2c9-fccae1af0816",
+      "The splash's frame timer, cleared by `stopStartupListing()`; reached from `packages/ui/src/index.ts`'s `session_shutdown` one module away and ownership-gated by `weInstalledTheSplash`, so a foreign session's shutdown cannot reach it — worst case a cut-short splash reveal. Deferred, not fixed. follow-up: tsk_00a5ad67-8bc1-42e4-b999-d75196ec37c2",
+  },
+  {
+    file: "packages/ui/src/startup/index.ts",
+    line: "let revealTimer: ReturnType<typeof setTimeout> | undefined;",
+    reason:
+      "The splash's reveal timer, same mechanism as frameTimer: cleared by `stopStartupListing()`, reached from `packages/ui/src/index.ts`'s `session_shutdown` one module away, gated by `weInstalledTheSplash`. Worst case a cut-short splash reveal. Deferred, not fixed. follow-up: tsk_00a5ad67-8bc1-42e4-b999-d75196ec37c2",
   },
 ];
 
@@ -162,7 +183,7 @@ function collectSourceFiles(): string[] {
 
 // ── The matcher ─────────────────────────────────────────────────────────────
 
-interface Hit {
+export interface Hit {
   file: string;
   line: number;
   rule: string;
@@ -452,8 +473,146 @@ function calledNames(body: string): string[] {
   return names;
 }
 
-/** Apply the rule to one source file's text. Reports the DECLARATION line. */
-function findViolationsInSource(src: string, file: string): Hit[] {
+// ── The cross-module hop ────────────────────────────────────────────────────
+//
+// How far a name resolves, and how many boundaries the walk is allowed to cross.
+// The hop is ONE boundary deep (the handler's file → the file it imports from),
+// plus transitive WITHIN that target file. The depth bound below is not that
+// boundary count — it is the barrel chain the resolver may follow to find where
+// an imported symbol is actually declared, so a re-export cycle cannot hang the
+// test.
+
+const MAX_BARREL_HOPS = 4;
+
+/** Where a local name came from: the symbol it is, and the specifier it came in on. */
+interface ImportRef {
+  readonly symbol: string;
+  readonly spec: string;
+}
+
+const IDENT = "([A-Za-z_$][\\w$]*)";
+
+function escapeName(name: string): string {
+  return name.replace(/\$/g, "\\$");
+}
+
+/**
+ * `localName → { symbol, spec }` for every NAMED import in `src`, `as` aliases
+ * included. `import type { … }` and `type`-marked specifiers are skipped — they
+ * name types, so a call site can never reach them — and so are default and
+ * `import * as ns` forms: a namespace import gives the guard no symbol to look
+ * up, which is the wall blind spot 1 still has.
+ */
+function parseImports(src: string): Map<string, ImportRef> {
+  const imports = new Map<string, ImportRef>();
+  for (const m of src.matchAll(/^import\s+([\s\S]*?)\s+from\s*["']([^"']+)["']/gm)) {
+    const clause = m[1] ?? "";
+    const spec = m[2] ?? "";
+    if (/^\s*type\b/.test(clause)) continue;
+    const open = clause.indexOf("{");
+    const close = clause.lastIndexOf("}");
+    if (open === -1 || close <= open) continue;
+    for (const part of clause.slice(open + 1, close).split(",")) {
+      const text = part.trim();
+      if (text.length === 0 || /^type\s/.test(text)) continue;
+      const m = new RegExp(`^${IDENT}(?:\\s+as\\s+${IDENT})?$`).exec(text);
+      if (m === null) continue;
+      const symbol = m[1];
+      const local = m[2] ?? m[1];
+      if (symbol && local) imports.set(local, { symbol, spec });
+    }
+  }
+  return imports;
+}
+
+/** A path the tree can read: `.js` entry points are `.ts` sources in this repo. */
+function tsVariants(path: string): string[] {
+  return /\.(?:js|mjs|cjs)$/.test(path) ? [path.replace(/\.(js|mjs|cjs)$/, ".ts"), path] : [path];
+}
+
+function firstReadable(paths: readonly string[], tree: SourceTree): string | undefined {
+  for (const path of paths) {
+    if (tree.read(path) !== undefined) return path;
+  }
+  return undefined;
+}
+
+/** `packages/diff/src/index.ts` + `./render/index.js` → `packages/diff/src/render/index.ts`. */
+function resolveRelative(fromFile: string, spec: string, tree: SourceTree): string | undefined {
+  const base = normalize(join(dirname(fromFile), spec));
+  return firstReadable(tsVariants(base).flatMap((p) => [p, `${p}/index.ts`]), tree);
+}
+
+/**
+ * `@pi-archimedes/<pkg>[/<sub>]` → the file that package's `exports` map points
+ * at, falling back to `packages/<pkg>/src/<sub>.ts`. Anything else — the
+ * `@earendil-works/*` host packages, `node:*`, bare npm names — resolves to
+ * nothing: the guard does not read outside this repo.
+ */
+function resolveWorkspacePackage(pkg: string | undefined, sub: string | undefined, tree: SourceTree): string | undefined {
+  if (!pkg) return undefined;
+  const manifest = tree.read(`packages/${pkg}/package.json`);
+  if (manifest !== undefined) {
+    try {
+      const exportsField: unknown = (JSON.parse(manifest) as { exports?: unknown }).exports;
+      if (exportsField !== null && typeof exportsField === "object" && !Array.isArray(exportsField)) {
+        const value = (exportsField as Record<string, unknown>)[sub === undefined ? "." : `./${sub}`];
+        if (typeof value === "string") {
+          const target = firstReadable(tsVariants(normalize(`packages/${pkg}/${value.replace(/^\.\//, "")}`)), tree);
+          if (target !== undefined) return target;
+        }
+      }
+    } catch {
+      // An unreadable manifest is simply not a hop.
+    }
+  }
+  return firstReadable(tsVariants(sub === undefined ? `packages/${pkg}/src/index.ts` : `packages/${pkg}/src/${sub}.ts`), tree);
+}
+
+function resolveSpec(fromFile: string, spec: string, tree: SourceTree): string | undefined {
+  if (spec.startsWith("./") || spec.startsWith("../")) return resolveRelative(fromFile, spec, tree);
+  const pkg = /^@pi-archimedes\/([^/]+)(?:\/(.+))?$/.exec(spec);
+  if (pkg) return resolveWorkspacePackage(pkg[1], pkg[2], tree);
+  return undefined;
+}
+
+/**
+ * Where `symbol` is actually declared, following `export { symbol } from "./other.js"`
+ * barrels (honouring `as` renames) until a real `export function` / `const` /
+ * `let` shows up. Returns the file plus the name it is declared under there, or
+ * undefined when the chain runs out or cycles past `MAX_BARREL_HOPS`.
+ */
+function resolveDeclaration(
+  file: string,
+  symbol: string,
+  tree: SourceTree,
+  depth = 0,
+): { file: string; symbol: string } | undefined {
+  const src = tree.read(file);
+  if (src === undefined) return undefined;
+  const declares = new RegExp(`^export\\s+(?:async\\s+)?(?:function|const|let|var)\\s+${escapeName(symbol)}\\b`, "m");
+  if (declares.test(src)) return { file, symbol };
+  if (depth >= MAX_BARREL_HOPS) return undefined;
+
+  for (const m of src.matchAll(/^export\s+(?!type\s)\{([^}]*)\}\s*from\s*["']([^"']+)["']/gm)) {
+    const spec = m[2] ?? "";
+    for (const part of (m[1] ?? "").split(",")) {
+      const m2 = new RegExp(`^${IDENT}(?:\\s+as\\s+${IDENT})?$`).exec(part.trim());
+      if (m2 === null) continue;
+      const declared = m2[1];
+      const exported = m2[2] ?? m2[1];
+      if (!declared || exported !== symbol) continue;
+      const next = resolveSpec(file, spec, tree);
+      if (next === undefined || next === file) continue;
+      const found = resolveDeclaration(next, declared, tree, depth + 1);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+/** Module-scope bindings `src` declares, with their declaration line and text. */
+function moduleDeclarations(src: string): Array<{ name: string; line: number; text: string }> {
   const declarations: Array<{ name: string; line: number; text: string }> = [];
   src.split("\n").forEach((text, i) => {
     for (const rule of RULES) {
@@ -462,11 +621,184 @@ function findViolationsInSource(src: string, file: string): Hit[] {
       if (name) declarations.push({ name, line: i + 1, text: text.trim() });
     }
   });
-  if (declarations.length === 0) return [];
+  return declarations;
+}
 
+/** Matches an assignment (never a comparison, never a compound form) to `name`. */
+function assignmentPattern(name: string): RegExp {
+  return new RegExp(`(?<![\\w.])${escapeName(name)}\\s*=[^=]`);
+}
+
+/**
+ * Every body in `src` the entry function can reach by calling other functions of
+ * the SAME file, transitively — the target half of the cross-module hop. Bounded
+ * by the `seen` set, so a call cycle terminates.
+ */
+function bodiesReachedFrom(entry: string, scopes: Map<string, string>): Set<string> {
+  const bodies = new Set<string>();
+  const seen = new Set<string>();
+  const queue: string[] = [entry];
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (name === undefined || seen.has(name)) continue;
+    seen.add(name);
+    const body = scopes.get(name);
+    if (body === undefined) continue;
+    bodies.add(body);
+    queue.push(...calledNames(body));
+  }
+  return bodies;
+}
+
+/**
+ * Hop 3's target side: the bindings THIS file declares that the entry function
+ * (or anything it calls, in this file) assigns. Reported against this file and
+ * this file's declaration line, so the allow-list keeps matching
+ * `file + exact trimmed declaration line`.
+ */
+function violationsAtTarget(file: string, entry: string, tree: SourceTree): Hit[] {
+  const src = tree.read(file);
+  if (src === undefined) return [];
+  const declarations = moduleDeclarations(src);
+  if (declarations.length === 0) return [];
+  const bodies = bodiesReachedFrom(entry, functionBodies(src));
+  if (bodies.size === 0) return [];
+  return declarations
+    .filter((decl) => {
+      const assigned = assignmentPattern(decl.name);
+      return [...bodies].some((body) => assigned.test(body));
+    })
+    .map((decl) => ({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text }));
+}
+
+/** End of an arrow's expression body: the next TOP-LEVEL `,` `)` `]` `;` or `}`.
+ * Only a closing bracket lowers the depth — a `,` or `;` nested inside a call,
+ * as in `() => format(a, b) + touch()`, belongs to that call's argument list,
+ * not to the arrow's own expression, and ending there would leave everything
+ * after the comma unmasked. */
+function expressionEnd(src: string, from: number): number {
+  let depth = 0;
+  let i = from;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) {
+      i = skipComment(src, i);
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      i = skipQuoted(src, i);
+      continue;
+    }
+    if (c === "`") {
+      i = skipTemplate(src, i);
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+    } else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return i;
+      depth -= 1;
+    } else if ((c === ";" || c === ",") && depth === 0) {
+      return i;
+    }
+    i += 1;
+  }
+  return src.length;
+}
+
+/**
+ * `src` with the bodies of every nested function/arrow BLANKED (each non-newline
+ * character replaced by a space, so line offsets survive). A closure written
+ * inside a handler body is not the handler speaking — it runs when whatever
+ * received it decides to, which is blind spot 2.
+ */
+function maskNestedLambdas(src: string): string {
+  const chars = src.split("");
+  const blank = (from: number, to: number): void => {
+    for (let i = from; i < to && i < chars.length; i++) if (chars[i] !== "\n") chars[i] = " ";
+  };
+  const isSpace = (at: number): boolean => at >= src.length || /\s/.test(src[at] ?? "");
+
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) {
+      i = skipComment(src, i);
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      i = skipQuoted(src, i);
+      continue;
+    }
+    if (c === "`") {
+      i = skipTemplate(src, i);
+      continue;
+    }
+    if (src.startsWith("function", i) && !/[\w$.]/.test(src[i - 1] ?? "") && !/[\w$]/.test(src[i + 8] ?? "")) {
+      const params = src.indexOf("(", i + 8);
+      const pastParams = params === -1 ? -1 : matchBracket(src, params);
+      const brace = pastParams === -1 ? -1 : src.indexOf("{", pastParams);
+      const pastBody = brace === -1 ? -1 : matchBracket(src, brace);
+      if (pastBody === -1) {
+        i += 8;
+        continue;
+      }
+      blank(i, pastBody);
+      i = pastBody;
+      continue;
+    }
+    if (c === "=" && src[i + 1] === ">") {
+      let j = i + 2;
+      while (j < src.length && /\s/.test(src[j] ?? "")) j += 1;
+      if (src.startsWith("async", j)) {
+        j += 5;
+        while (j < src.length && /\s/.test(src[j] ?? "")) j += 1;
+      }
+      if (src[j] === "{") {
+        const pastBody = matchBracket(src, j);
+        if (pastBody === -1) {
+          i = j + 1;
+          continue;
+        }
+        blank(j, pastBody);
+        i = pastBody;
+        continue;
+      }
+      const end = isSpace(j) ? j : expressionEnd(src, j);
+      blank(j, end);
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return chars.join("");
+}
+
+/**
+ * The names a handler body calls ITSELF. Hop 3 uses this narrower surface rather
+ * than the flat `calledNames`: a call made inside a closure the handler hands to
+ * `ctx.ui.setFooter()`/`setHeader()` is not a call the handler makes, and the
+ * header's blind spot 2 says so. Following it would flag the footer's git/jj/
+ * token-stat caches — state the header names as honest process-wide caching, and
+ * which the rule must NOT flag — on the strength of a `render()` callback.
+ */
+function calledNamesAtHandlerLevel(bodies: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const body of bodies) {
+    for (const name of calledNames(maskNestedLambdas(body))) names.add(name);
+  }
+  return names;
+}
+
+/** Apply the rule to one source file's text. Reports the DECLARATION line. */
+function findViolationsInSource(src: string, file: string, tree: SourceTree = REPO_TREE): Hit[] {
+  // A file with no session handler cannot start an assignment path at all — but
+  // a file with no binding of its own CAN still be the origin of a cross-module
+  // hit, so the declaration check stays inside the intra-file hops.
   const bodies = handlerBodies(src);
   if (bodies.length === 0) return [];
 
+  const declarations = moduleDeclarations(src);
   const scopes = functionBodies(src);
   const reached = new Set<string>();
   for (const body of bodies) {
@@ -474,30 +806,106 @@ function findViolationsInSource(src: string, file: string): Hit[] {
       if (scopes.has(name)) reached.add(name);
     }
   }
+  // Hop 3's narrower surface: calls the handler body makes directly (see
+  // `calledNamesAtHandlerLevel`). Hops 1 and 2 are unchanged.
+  const handlerLevelCalls = calledNamesAtHandlerLevel(bodies);
 
   const hits: Hit[] = [];
+  const seen = new Set<string>();
+  const record = (hit: Hit): void => {
+    const key = format(hit);
+    if (seen.has(key)) return;
+    seen.add(key);
+    hits.push(hit);
+  };
+
   for (const decl of declarations) {
-    const assigned = new RegExp(`(?<![\\w.])${decl.name.replace(/\$/g, "\\$")}\\s*=[^=]`);
+    const assigned = assignmentPattern(decl.name);
     // Hop 1: the handler body writes it itself.
     if (bodies.some((body) => assigned.test(body))) {
-      hits.push({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text });
+      record({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text });
       continue;
     }
     // Hop 2: a function the handler body calls directly writes it.
     for (const name of reached) {
       if (assigned.test(scopes.get(name) ?? "")) {
-        hits.push({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text });
+        record({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text });
         break;
       }
     }
   }
+
+  // Hop 3: the handler calls a function it IMPORTED from another file, and the
+  // write happens over there. Named imports only — a namespace import never
+  // enters `parseImports`, and `CALLS` cannot match `ns.fn(` anyway, so
+  // `core/src/bridge/index.ts` → `events.ts` stays invisible by design.
+  const imports = parseImports(src);
+  for (const name of handlerLevelCalls) {
+    if (scopes.has(name)) continue;
+    const imported = imports.get(name);
+    if (imported === undefined) continue;
+    const entryFile = resolveSpec(file, imported.spec, tree);
+    if (entryFile === undefined) continue;
+    const target = resolveDeclaration(entryFile, imported.symbol, tree);
+    if (target === undefined || target.file === file) continue;
+    for (const hit of violationsAtTarget(target.file, target.symbol, tree)) record(hit);
+  }
   return hits;
 }
+
+/**
+ * A file tree the matcher can read without touching disk: fixture sources keyed
+ * by path, plus the repo tree behind them. `read` is what the cross-module hop
+ * uses to fetch an import target, and every read is cached — the guard walks over
+ * 150 files and the hop adds one read per distinct import target.
+ */
+interface SourceTree {
+  readonly read: (file: string) => string | undefined;
+}
+
+/** The repo tree, with contents cached on first read. */
+function repoTree(): SourceTree {
+  const cache = new Map<string, string>();
+  return {
+    read(file) {
+      const cached = cache.get(file);
+      if (cached !== undefined) return cached;
+      try {
+        const src = readFileSync(join(REPO_ROOT, file), "utf8");
+        cache.set(file, src);
+        return src;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+/** A fixture tree: the map's own files, nothing on disk. */
+function memoryTree(sources: ReadonlyMap<string, string>): SourceTree {
+  const cache = new Map(sources);
+  return { read: (file) => cache.get(file) };
+}
+
+const REPO_TREE = repoTree();
 
 function findViolations(files: readonly string[]): Hit[] {
   const hits: Hit[] = [];
   for (const file of files) {
-    hits.push(...findViolationsInSource(readFileSync(join(REPO_ROOT, file), "utf8"), file));
+    hits.push(...findViolationsInSource(readFileSync(join(REPO_ROOT, file), "utf8"), file, REPO_TREE));
+  }
+  return hits;
+}
+
+/**
+ * Test seam for multi-file fixtures: the same matcher, fed an in-memory tree
+ * instead of the repo, so a fixture never touches the working copy.
+ */
+export function findViolationsInSources(sources: ReadonlyMap<string, string>): Hit[] {
+  const tree = memoryTree(sources);
+  const hits: Hit[] = [];
+  for (const [file, src] of sources) {
+    hits.push(...findViolationsInSource(src, file, tree));
   }
   return hits;
 }
@@ -574,6 +982,96 @@ export function register(pi: ExtensionAPI): void {
 }
 `;
 
+/**
+ * The target half of the cross-module fixtures: the binding lives here, and the
+ * only function that writes it is reached from ANOTHER file's handler. This is
+ * the shape `packages/diff` shipped (`setShikiConfig`/`setRenderConfig`), and the
+ * shape `ui` still ships (`stopStartupListing` writes `frameTimer`/`revealTimer`).
+ */
+const CONFIG_TARGET = `let _cfg: (() => Cfg) | undefined;
+
+export function setConfigGetter(fn: () => Cfg): void {
+  _cfg = fn;
+}
+`;
+
+/**
+ * The cross-module hop: a handler calls a function it IMPORTED under an `as`
+ * alias, and the assignment happens one module away. A one-file rule reads this
+ * as clean — which is exactly how three lifecycle-reachable bindings shipped in
+ * `packages/diff`.
+ */
+const CROSS_MODULE_HOP = new Map([
+  [
+    "index.ts",
+    `
+import { setConfigGetter as setCfg } from "./shiki.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    setCfg(() => buildConfig(ctx));
+  });
+}
+`,
+  ],
+  ["shiki.ts", CONFIG_TARGET],
+]);
+
+/**
+ * The same shape behind a NAMESPACE import, which the hop deliberately does not
+ * follow: `CALLS` cannot match `ns.fn(`, and following it would flag the five
+ * honest one-socket-per-process bindings in `core/src/bridge/` with nowhere to
+ * put them. Pinning it here makes widening the hop a deliberate edit.
+ */
+const NAMESPACE_IMPORT_NOT_FOLLOWED = new Map([
+  [
+    "index.ts",
+    `
+import * as shiki from "./shiki.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    shiki.setConfigGetter(() => buildConfig(ctx));
+  });
+}
+`,
+  ],
+  ["shiki.ts", CONFIG_TARGET],
+]);
+
+/**
+ * Blind spot 2's wall, in the shape that leaks if the mask is drawn wrong: the
+ * handler hands over a callback whose EXPRESSION body is a multi-argument call
+ * followed by another call. A `,` INSIDE `format(ctx, theme)` is not the end of
+ * that expression, so the mask has to swallow the whole thing — stop it at the
+ * comma and `touch(` survives the blanking, hop 3 reads it as a call the handler
+ * makes itself, and the unrelated module state behind `touch` gets reported on
+ * the strength of a footer callback.
+ */
+const CALLBACK_ARG_TAIL_NOT_FOLLOWED = new Map([
+  [
+    "index.ts",
+    `
+import { touch } from "./other.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.setFooter(() => format(ctx, theme) + touch());
+  });
+}
+`,
+  ],
+  [
+    "other.ts",
+    `let _hidden: number | undefined;
+
+export function touch(): void {
+  _hidden = 1;
+}
+`,
+  ],
+]);
+
 /** Honest process state: a module `let`, written only outside any handler. */
 const WRITTEN_OUTSIDE_HANDLERS = `
 let cache: Map<string, string> | undefined;
@@ -600,8 +1098,9 @@ describe("session-state discipline: no per-session state at module scope", () =>
     expect(existsSync(join(REPO_ROOT, "pnpm-workspace.yaml"))).toBe(true);
     expect(FILES.length).toBeGreaterThan(50);
     // The three trees the guard is supposed to cover, including the two whose
-    // assignment paths it cannot see (header: blind spot 1) — they must still be
-    // scanned, or a future same-file violation escapes silently.
+    // assignment paths cross a boundary the hop does not follow (header: blind
+    // spot 1) — they must still be scanned, or a future same-file violation
+    // escapes silently.
     for (const expected of [
       "packages/image-paste/src/index.ts",
       "packages/ui/src/index.ts",
@@ -657,12 +1156,56 @@ describe("session-state discipline: no per-session state at module scope", () =>
     ).toEqual(["moduleLevel", "alsoModule"]);
   });
 
+  it("follows one cross-module import hop for named imports only", () => {
+    // The hop: `index.ts`'s handler calls an imported function under an `as`
+    // alias, `shiki.ts` is where the binding is written. The hit is reported
+    // against the TARGET file and the target's declaration line, because that is
+    // the pair the allow-list matches on.
+    expect(findViolationsInSources(CROSS_MODULE_HOP).map(format)).toEqual([
+      "shiki.ts:1 [module-scope binding assigned by a session handler] let _cfg: (() => Cfg) | undefined;",
+    ]);
+
+    // The wall, pinned on purpose: a namespace import is not followed (see the
+    // header's blind spot 1), so the same shape behind `import * as ns` stays
+    // invisible. Widening this must be a deliberate edit to this assertion.
+    expect(findViolationsInSources(NAMESPACE_IMPORT_NOT_FOLLOWED).map(format)).toEqual([]);
+
+    // Blind spot 2's wall, and the mask that draws it: a call made inside a
+    // callback the handler passes elsewhere never starts a hop — including when
+    // the callback's expression body holds a multi-argument call, where a `,`
+    // must NOT be read as the end of that expression.
+    expect(findViolationsInSources(CALLBACK_ARG_TAIL_NOT_FOLLOWED).map(format)).toEqual([]);
+
+    // Positive control for the fixture above, so the green is not vacuous: the
+    // SAME two files, with `touch()` called at handler level instead of inside
+    // the passed callback, do report the target's binding.
+    const atHandlerLevel = new Map([
+      [
+        "index.ts",
+        `
+import { touch } from "./other.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    touch();
+  });
+}
+`,
+      ],
+      ["other.ts", CALLBACK_ARG_TAIL_NOT_FOLLOWED.get("other.ts")!],
+    ]);
+    expect(findViolationsInSources(atHandlerLevel).map(format)).toEqual([
+      "other.ts:1 [module-scope binding assigned by a session handler] let _hidden: number | undefined;",
+    ]);
+  });
+
   it("keeps the allow-list as small as the work that removes it", () => {
     expect(EXCUSED.map(format).sort()).toEqual(
       [
-        "packages/diff/src/index.ts:44 [module-scope binding assigned by a session handler] let _readConfig: () => DiffConfig = () => DEFAULT_DIFF_CONFIG;",
         "packages/notify/src/index.ts:197 [module-scope binding assigned by a session handler] let notifyTimer: ReturnType<typeof setTimeout> | null = null;",
         "packages/notify/src/index.ts:198 [module-scope binding assigned by a session handler] let pendingTrigger: TriggerType | null = null;",
+        "packages/ui/src/startup/index.ts:171 [module-scope binding assigned by a session handler] let frameTimer: ReturnType<typeof setInterval> | undefined;",
+        "packages/ui/src/startup/index.ts:172 [module-scope binding assigned by a session handler] let revealTimer: ReturnType<typeof setTimeout> | undefined;",
       ].sort(),
     );
 
@@ -682,12 +1225,21 @@ describe("session-state discipline: no per-session state at module scope", () =>
       expect(/^(?:export\s+)?(?:let|var)\s/.test(entry.line), `allow-list entry is not a declaration: ${entry.line}`).toBe(true);
     }
 
-    // The two files whose assignment paths cross a module boundary are excused
-    // by the rule's shape, not by an entry — pin that, so a future edit that
-    // makes them visible is noticed rather than absorbed.
-    for (const escaped of ["packages/core/src/bridge/events.ts", "packages/ui/src/startup/index.ts"]) {
+    // The one assignment path that crosses a module boundary the hop does NOT
+    // follow is excused by the rule's shape, not by an entry — pin that, so a
+    // future edit that makes it visible is noticed rather than absorbed. It
+    // stays invisible because `bridge/index.ts` reaches it through a NAMESPACE
+    // import (`import * as events` → `events.onSessionStart(ctx)`), which gives
+    // the resolver no symbol to look up and which `CALLS` cannot even match.
+    for (const escaped of ["packages/core/src/bridge/events.ts"]) {
       expect(ALLOW_LIST.some((e) => e.file === escaped), `${escaped} must not need an entry`).toBe(false);
       expect(VIOLATIONS.some((v) => v.file === escaped) || EXCUSED.some((v) => v.file === escaped)).toBe(false);
     }
+
+    // `packages/ui/src/startup/index.ts` used to sit in that list. The hop sees it
+    // now, so it is excused by an entry like anything else — pin the flip so a
+    // quiet narrowing of the hop cannot put it back behind the wall.
+    expect(EXCUSED.filter((h) => h.file === "packages/ui/src/startup/index.ts")).toHaveLength(2);
   });
 });
+

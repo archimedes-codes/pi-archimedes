@@ -14,6 +14,15 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createEditTool } from "@earendil-works/pi-coding-agent";
 import { createEditRenderers, installEditTool } from "./edit.js";
+import type { DiffRenderConfig } from "../render/index.js";
+
+/** The config the rows read — now threaded per registration rather than held per module (#163). */
+const DIFF_TEST_CONFIG: DiffRenderConfig = {
+  diffTheme: "github-dark",
+  diffSplitMinWidth: 150,
+  diffSplitMinCodeWidth: 60,
+  diffSplitWrapCheck: true,
+};
 
 // `diff` is standalone and must not import `@pi-archimedes/core` (see
 // `src/pi-support.ts`), so the tests strip escape sequences themselves.
@@ -39,6 +48,7 @@ function captureTool(cwd: string, home: string) {
     } as unknown as ExtensionAPI,
     cwd,
     home,
+    () => DIFF_TEST_CONFIG,
   );
   return resolved;
 }
@@ -185,7 +195,7 @@ describe("edit row padding", () => {
   // The row draws its own shell (`renderShell: "self"`), so the inset is ours to
   // choose — but pi still tells the renderer how much tool output is padded
   // here, and that number is what the row must respect.
-  const renderers = createEditRenderers("/project", "/home");
+  const renderers = createEditRenderers("/project", "/home", () => DIFF_TEST_CONFIG);
   const callArgs = { path: "/project/src/a.ts", edits: [{ oldText: "x", newText: "y" }] };
 
   function padXFor(outputPad: number): number {
