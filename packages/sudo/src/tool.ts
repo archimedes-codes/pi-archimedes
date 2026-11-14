@@ -549,6 +549,13 @@ export function createSudoExecTool(options: {
 						error: "command not confirmed",
 					});
 				}
+				// The dialog is awaited, so the entry above may have been cleared or have
+				// expired while the human decided (`/sudo forget`, another session's
+				// `session_start`, the TTL elapsing). Re-read it rather than running on
+				// the retained object: a revoked credential must be re-prompted for.
+				// The read above stays where it is — `confirmationSkipped` is computed
+				// from it and decides whether a dialog exists at all.
+				credential = credentialCache.get();
 			}
 			if (!credential) {
 				const password = await promptForPassword(ctx, command, reason);

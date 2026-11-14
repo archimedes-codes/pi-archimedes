@@ -501,6 +501,104 @@ describe("sudo_exec tool", () => {
 			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
 		});
 
+		it("re-reads the cache after the dialog: a credential cleared while the human was deciding is not used", async () => {
+			// The hoist of the cache read above the gate is ADR 0033's whole structural
+			// change, but the pre-dialog read only decides whether a dialog exists. The
+			// read that arms the run has to happen AFTER the awaited dialog, or whatever
+			// lands during it (`/sudo forget`, another session's `session_start`, the TTL
+			// elapsing) is silently dropped and a revoked password reaches `sudo -S`.
+			const { spawner, last } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("STALE-PASSWORD", 60_000);
+			const spies = spiesNoPrompt();
+			const ui = {
+				confirm: (title: string, message: string) => {
+					spies.confirmCalls.push({ title, message });
+					credentialCache.clear(); // the human runs /sudo forget while the dialog is open
+					return Promise.resolve(true);
+				},
+				custom: (factory: unknown): Promise<string> => {
+					spies.customCalls.push(factory);
+					return Promise.resolve("FRESH-PASSWORD");
+				},
+			};
+			const ctx = { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext;
+
+			const result = await run(tool, ctx, { command: "id", reason: "whoami" });
+
+			expect(spies.confirmCalls).toHaveLength(1);
+			expect(spies.customCalls).toHaveLength(1); // re-prompted, exactly as before the hoist
+			expect(last.child.stdin.written.join("")).toBe("FRESH-PASSWORD\n");
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBeUndefined();
+		});
+
+		it("honours the same window when the entry expires during the dialog, not only before the call", async () => {
+			const { spawner, last } = makeFakeSpawner({ stdout: "ok\n", code: 0 });
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("STALE-PASSWORD", 20); // live at the pre-dialog read, dead after the wait
+			const spies = spiesNoPrompt();
+			const ui = {
+				confirm: async (title: string, message: string) => {
+					spies.confirmCalls.push({ title, message });
+					await new Promise((resolve) => setTimeout(resolve, 30));
+					return true;
+				},
+				custom: (factory: unknown): Promise<string> => {
+					spies.customCalls.push(factory);
+					return Promise.resolve("FRESH-PASSWORD");
+				},
+			};
+			const ctx = { mode: "tui", hasUI: true, cwd: "/tmp", ui } as unknown as ExtensionContext;
+
+			const result = await run(tool, ctx, { command: "id", reason: "whoami" });
+
+			expect(spies.customCalls).toHaveLength(1);
+			expect(last.child.stdin.written.join("")).toBe("FRESH-PASSWORD\n");
+			expect(result.isError).toBeFalsy();
+		});
+
+		it("marks the English auth-failure fast path too — the one gated() funnel with no skip-path coverage", async () => {
+			// A wrong-password run that skipped the gate is the result a reader most
+			// needs to see was unconfirmed, and the English signature path is the only
+			// gated() return the rest of the suite never reaches with the skip on.
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({
+				stderr: "[sudo] password for daniel: \nsorry, try again.\n3 incorrect password attempts\n",
+				code: 1,
+			});
+			const tool = createSudoExecTool({ spawner });
+			credentialCache.set("cachedpw", 60_000);
+			const spies = spiesNoPrompt();
+
+			const result = await run(tool, tuiCtxWithSpies(true, spies), { command: "reboot", reason: "maintain" });
+
+			expect(spies.confirmCalls).toHaveLength(0); // the skip path, not the confirm path
+			expect(result.isError).toBe(true);
+			const text = (result.content[0] as { text: string }).text;
+			expect(text.startsWith(`${CONFIRMATION_SKIPPED_MARKER}\n`)).toBe(true);
+			expect(text).toMatch(/authentication failed \(incorrect password\)/i);
+			expect((result.details as { confirmationSkipped?: boolean }).confirmationSkipped).toBe(true);
+		});
+
+		it("keeps the unverified warning AFTER stdout, not merely somewhere in the text", async () => {
+			// With stdout empty, marker-then-warning and warning-then-marker are
+			// byte-identical, so the existing strike-1 case cannot pin the order. One
+			// line of stdout makes the two orderings distinguishable.
+			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+			const { spawner } = makeFakeSpawner({ stdout: "partial\n", stderr: "boom\n", code: 1 });
+			const { authProbe, passwordProbe } = probeSpy(false, false, false); // both probes non-terminal
+			const tool = createSudoExecTool({ spawner, authProbe, passwordProbe });
+			credentialCache.set("pw", 60_000);
+
+			const result = await run(tool, tuiCtxWithSpies(true, spiesNoPrompt()), { command: "false", reason: "strike one" });
+
+			const text = (result.content[0] as { text: string }).text;
+			expect(text.startsWith(`${CONFIRMATION_SKIPPED_MARKER}\n`)).toBe(true); // marker first
+			expect(text.indexOf("partial\n")).toBeGreaterThan(text.indexOf(CONFIRMATION_SKIPPED_MARKER));
+			expect(text.indexOf("(WARNING:")).toBeGreaterThan(text.indexOf("partial\n")); // warning last
+			expect((result.details as { error?: string }).error).toMatch(/— WARNING:/);
+		});
+
 		it("applies the same rule in bridge mode: no Client confirm, and both channels still say so", async () => {
 			store.settings["archimedes.sudo"] = { confirmWhenCached: false };
 			bridgeState.active = true;
