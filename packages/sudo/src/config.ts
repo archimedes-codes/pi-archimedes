@@ -16,8 +16,8 @@ export interface SudoConfig {
 	 * already cached. Default `true` — the confirmation is the last human gate
 	 * once the password is cached (ADR 0010, ADR 0033). Set it to `false` to
 	 * confirm only on the runs that will ask for a password, i.e. the first one
-	 * per session, and to accept that the agent can then run privileged commands
-	 * unattended for the rest of the cache TTL.
+	 * while the credential cache is empty, and to accept that the agent can then
+	 * run privileged commands unattended for the rest of the cache TTL.
 	 */
 	confirmWhenCached: boolean;
 }

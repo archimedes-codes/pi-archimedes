@@ -13,6 +13,7 @@ import { createSudoExecTool } from "./tool.js";
 
 const tool = createSudoExecTool() as unknown as {
   name: string;
+  description?: string;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
   exposure?: string;
 };
@@ -35,5 +36,26 @@ describe("sudo_exec annotations", () => {
 
   it("stays reachable by default (direct exposure, active on registration)", () => {
     expect(tool.exposure ?? "direct").toBe("direct");
+  });
+});
+
+describe("sudo_exec description", () => {
+  // The description is handed to the model on every call, and it now carries the
+  // skip contract (ADR 0033): without a pin the wording drifts silently, which is
+  // how bullet 2 kept saying "for the session" after the cache became
+  // process-scoped.
+  const description = tool.description ?? "";
+
+  it("names the setting that skips the gate, so the model can explain the exception", () => {
+    expect(description).toContain("confirmWhenCached");
+  });
+
+  it("scopes the cache to the process, not the session", () => {
+    expect(description).toContain("cached in memory for the process");
+    expect(description).not.toContain("for the session");
+  });
+
+  it("still says the password is never exposed", () => {
+    expect(description).toContain("never exposed");
   });
 });

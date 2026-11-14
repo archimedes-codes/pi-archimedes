@@ -406,7 +406,7 @@ export function buildSudoArgv(command: string): string[] {
 const SUDO_EXEC_DESCRIPTION = `Run a command with elevated privileges using sudo.
 
 - BEFORE any credential is requested, the exact command and its reason are shown to the user for confirmation. The one exception is user configuration: with \`archimedes.sudo.confirmWhenCached: false\`, a command whose credential is already cached runs without that confirmation, and the result text starts with a line saying so.
-- The password is entered only through a masked UI, passed to sudo via stdin, cached in memory for the session, and never exposed.
+- The password is entered only through a masked UI, passed to sudo via stdin, cached in memory for the process, and never exposed.
 - Use this instead of sudo in bash — interactive sudo in bash is blocked.
 - The command is executed as argv, NOT through a shell: no pipes, redirects, &&, ;, or env assignments; pass args space-separated, quote only literal args.`;
 
