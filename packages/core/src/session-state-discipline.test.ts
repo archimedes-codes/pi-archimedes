@@ -671,7 +671,11 @@ function violationsAtTarget(file: string, entry: string, tree: SourceTree): Hit[
     .map((decl) => ({ file, line: decl.line, rule: COLLECTOR.label, text: decl.text }));
 }
 
-/** End of an arrow's expression body: the next top-level `,` `)` `]` `;` or `}`. */
+/** End of an arrow's expression body: the next TOP-LEVEL `,` `)` `]` `;` or `}`.
+ * Only a closing bracket lowers the depth — a `,` or `;` nested inside a call,
+ * as in `() => format(a, b) + touch()`, belongs to that call's argument list,
+ * not to the arrow's own expression, and ending there would leave everything
+ * after the comma unmasked. */
 function expressionEnd(src: string, from: number): number {
   let depth = 0;
   let i = from;
@@ -689,10 +693,13 @@ function expressionEnd(src: string, from: number): number {
       i = skipTemplate(src, i);
       continue;
     }
-    if (c === "(" || c === "[" || c === "{") depth += 1;
-    else if (c === ")" || c === "]" || c === "}" || c === ";" || c === ",") {
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+    } else if (c === ")" || c === "]" || c === "}") {
       if (depth === 0) return i;
       depth -= 1;
+    } else if ((c === ";" || c === ",") && depth === 0) {
+      return i;
     }
     i += 1;
   }
@@ -1032,6 +1039,39 @@ export function register(pi: ExtensionAPI): void {
   ["shiki.ts", CONFIG_TARGET],
 ]);
 
+/**
+ * Blind spot 2's wall, in the shape that leaks if the mask is drawn wrong: the
+ * handler hands over a callback whose EXPRESSION body is a multi-argument call
+ * followed by another call. A `,` INSIDE `format(ctx, theme)` is not the end of
+ * that expression, so the mask has to swallow the whole thing — stop it at the
+ * comma and `touch(` survives the blanking, hop 3 reads it as a call the handler
+ * makes itself, and the unrelated module state behind `touch` gets reported on
+ * the strength of a footer callback.
+ */
+const CALLBACK_ARG_TAIL_NOT_FOLLOWED = new Map([
+  [
+    "index.ts",
+    `
+import { touch } from "./other.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.setFooter(() => format(ctx, theme) + touch());
+  });
+}
+`,
+  ],
+  [
+    "other.ts",
+    `let _hidden: number | undefined;
+
+export function touch(): void {
+  _hidden = 1;
+}
+`,
+  ],
+]);
+
 /** Honest process state: a module `let`, written only outside any handler. */
 const WRITTEN_OUTSIDE_HANDLERS = `
 let cache: Map<string, string> | undefined;
@@ -1129,6 +1169,34 @@ describe("session-state discipline: no per-session state at module scope", () =>
     // header's blind spot 1), so the same shape behind `import * as ns` stays
     // invisible. Widening this must be a deliberate edit to this assertion.
     expect(findViolationsInSources(NAMESPACE_IMPORT_NOT_FOLLOWED).map(format)).toEqual([]);
+
+    // Blind spot 2's wall, and the mask that draws it: a call made inside a
+    // callback the handler passes elsewhere never starts a hop — including when
+    // the callback's expression body holds a multi-argument call, where a `,`
+    // must NOT be read as the end of that expression.
+    expect(findViolationsInSources(CALLBACK_ARG_TAIL_NOT_FOLLOWED).map(format)).toEqual([]);
+
+    // Positive control for the fixture above, so the green is not vacuous: the
+    // SAME two files, with `touch()` called at handler level instead of inside
+    // the passed callback, do report the target's binding.
+    const atHandlerLevel = new Map([
+      [
+        "index.ts",
+        `
+import { touch } from "./other.js";
+
+export function register(pi: ExtensionAPI): void {
+  pi.on("session_start", (_event, ctx) => {
+    touch();
+  });
+}
+`,
+      ],
+      ["other.ts", CALLBACK_ARG_TAIL_NOT_FOLLOWED.get("other.ts")!],
+    ]);
+    expect(findViolationsInSources(atHandlerLevel).map(format)).toEqual([
+      "other.ts:1 [module-scope binding assigned by a session handler] let _hidden: number | undefined;",
+    ]);
   });
 
   it("keeps the allow-list as small as the work that removes it", () => {
