@@ -30,7 +30,28 @@ export interface SudoExecDetails {
 	stdout: string;
 	stderr: string;
 	error?: string;
+	/**
+	 * Present and `true` only when the confirmation gate was skipped because a
+	 * credential was already cached (`archimedes.sudo.confirmWhenCached: false`,
+	 * ADR 0033). This is the machine-readable record of the skipped gate in the
+	 * session file; `CONFIRMATION_SKIPPED_MARKER` is the same fact in the result
+	 * text, which is the half the terminal and the model actually see.
+	 */
+	confirmationSkipped?: boolean;
 }
+
+/**
+ * First line of a tool result whose confirmation gate was skipped (ADR 0033).
+ *
+ * It belongs in the result **text**, not only in `details`: this tool registers
+ * no result renderer, so the TUI fallback prints `content[].text` alone, and
+ * both provider transforms rebuild a tool result from `content`, dropping
+ * `details`. Without the line, a run nobody approved is word-for-word what an
+ * approved one looks like — to the human reading the transcript, and to the
+ * model deciding whether to issue the next privileged command.
+ */
+export const CONFIRMATION_SKIPPED_MARKER =
+	"[sudo] confirmation skipped — cached credential, archimedes.sudo.confirmWhenCached: false (no human confirmed this command)";
 
 // ── process plumbing ─────────────────────────────────────────────────────────
 
@@ -384,8 +405,8 @@ export function buildSudoArgv(command: string): string[] {
 
 const SUDO_EXEC_DESCRIPTION = `Run a command with elevated privileges using sudo.
 
-- BEFORE any credential is requested, the exact command and its reason are shown to the user for confirmation.
-- The password is entered only through a masked UI, passed to sudo via stdin, cached in memory for the session, and never exposed.
+- BEFORE any credential is requested, the exact command and its reason are shown to the user for confirmation. The one exception is user configuration: with \`archimedes.sudo.confirmWhenCached: false\`, a command whose credential is already cached runs without that confirmation, and the result text starts with a line saying so.
+- The password is entered only through a masked UI, passed to sudo via stdin, cached in memory for the process, and never exposed.
 - Use this instead of sudo in bash — interactive sudo in bash is blocked.
 - The command is executed as argv, NOT through a shell: no pipes, redirects, &&, ;, or env assignments; pass args space-separated, quote only literal args.`;
 
@@ -488,20 +509,54 @@ export function createSudoExecTool(options: {
 			}
 
 			// Display the exact command + reason and require confirmation
-			// BEFORE any credential is acquired.
-			const confirmed = await confirmCommand(ctx, command, reason);
-			if (!confirmed) {
-				return fail("Command not confirmed — not executed, and no password was requested.", {
-					command,
-					reason,
-					exitCode: -1,
-					stdout: "",
-					stderr: "",
-					error: "command not confirmed",
-				});
-			}
-
+			// BEFORE any credential is acquired (ADR 0010). The one exception is
+			// opt-in and narrow — `confirmWhenCached: false` with a credential
+			// already cached: the password prompt already showed this user the
+			// command and reason it was cached for, and the run is recorded with
+			// `confirmationSkipped` (ADR 0033). Nothing about the credential is
+			// changed here, and a cache miss still confirms and prompts.
 			let credential = credentialCache.get();
+			const confirmationSkipped = credential !== null && config.confirmWhenCached === false;
+			/**
+			 * Attach the gate provenance to a result produced after the gate: the
+			 * flag for the session file, and the marker line in front of the text —
+			 * which is the half a human in the terminal and the model actually see.
+			 * Prefixing keeps every existing suffix (the unverified-credential
+			 * warning) exactly where it read before.
+			 */
+			const gated = <T extends { content: Array<{ type: "text"; text: string }>; details: SudoExecDetails }>(result: T): T => {
+				if (!confirmationSkipped) return result;
+				const text = result.content[0]?.text ?? "";
+				return {
+					...result,
+					// A failed command with no stdout gets the marker alone — not a
+					// marker plus an empty line the terminal then renders as a gap.
+					content: [
+						{ type: "text" as const, text: text ? `${CONFIRMATION_SKIPPED_MARKER}\n${text}` : CONFIRMATION_SKIPPED_MARKER },
+					],
+					details: { ...result.details, confirmationSkipped: true },
+				};
+			};
+			if (!confirmationSkipped) {
+				const confirmed = await confirmCommand(ctx, command, reason);
+				if (!confirmed) {
+					return fail("Command not confirmed — not executed, and no password was requested.", {
+						command,
+						reason,
+						exitCode: -1,
+						stdout: "",
+						stderr: "",
+						error: "command not confirmed",
+					});
+				}
+				// The dialog is awaited, so the entry above may have been cleared or have
+				// expired while the human decided (`/sudo forget`, another session's
+				// `session_start`, the TTL elapsing). Re-read it rather than running on
+				// the retained object: a revoked credential must be re-prompted for.
+				// The read above stays where it is — `confirmationSkipped` is computed
+				// from it and decides whether a dialog exists at all.
+				credential = credentialCache.get();
+			}
 			if (!credential) {
 				const password = await promptForPassword(ctx, command, reason);
 				if (!password) {
@@ -541,26 +596,26 @@ export function createSudoExecTool(options: {
 			// auth failure, and never drop the password: a transport glitch is
 			// transient relative to the credential itself.
 			if (run.error) {
-				return fail(`failed to run privileged command: ${run.error}`, {
+				return gated(fail(`failed to run privileged command: ${run.error}`, {
 					command,
 					reason,
 					exitCode: run.exitCode,
 					stdout,
 					stderr,
 					error: run.error,
-				});
+				}));
 			}
 
 			if (run.authFailed) {
 				credentialCache.clear();
-				return fail(
+				return gated(fail(
 					`sudo authentication failed (incorrect password) — exit code ${run.exitCode}. The in-memory credential cache was cleared; the user will be re-prompted on the next attempt.`,
 					{ command, reason, exitCode: run.exitCode, stdout, stderr, error: "authentication failed" },
-				);
+				));
 			}
 
 			if (run.timedOut) {
-				return {
+				return gated({
 					content: [{ type: "text" as const, text: stdout }],
 					details: {
 						command,
@@ -571,7 +626,7 @@ export function createSudoExecTool(options: {
 						error: `timed out after ${timeoutMs}ms — command was killed`,
 					} satisfies SudoExecDetails,
 					isError: true,
-				};
+				});
 			}
 
 			// Locale-immune auth-failure disambiguation: the run exited
@@ -638,10 +693,10 @@ export function createSudoExecTool(options: {
 					credentialCache.bumpFailStreak();
 					if ((credentialCache.get()?.failStreak ?? 0) >= 2) {
 						credentialCache.clear();
-						return fail(
+						return gated(fail(
 							`sudo authentication failed — exit code ${run.exitCode}. The cached password produced two consecutive failures without a verifiable credential — the credential cache was cleared; you will be re-prompted for the password on the next sudo_exec.`,
 							{ command, reason, exitCode: run.exitCode, stdout, stderr, error: "authentication failed" },
-						);
+						));
 					}
 					unverifiedCredentialWarning = true; // strike 1: keep, warn, and fall through to the normal failure result
 				}
@@ -650,12 +705,12 @@ export function createSudoExecTool(options: {
 			const isError = run.exitCode !== 0;
 			if (!isError) {
 				credentialCache.resetFailStreak();
-				return {
+				return gated({
 					content: [{ type: "text" as const, text: stdout }],
 					details: { command, reason, exitCode: run.exitCode, stdout, stderr } satisfies SudoExecDetails,
-				};
+				});
 			}
-			return {
+			return gated({
 				content: [{ type: "text" as const, text: unverifiedCredentialWarning ? `${stdout}\n(WARNING: ${AMBIGUOUS_CREDENTIAL_WARNING})` : stdout }],
 				details: {
 					command,
@@ -668,7 +723,7 @@ export function createSudoExecTool(options: {
 						: `command failed with exit code ${run.exitCode}`,
 				} satisfies SudoExecDetails,
 				isError: true,
-			};
+			});
 		},
 	};
 }

@@ -21,8 +21,10 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 	// direct testing; handleBashToolCall only vets — it never mutates event.input.
 	pi.on("tool_call", (event) => handleBashToolCall(event));
 
-	// Session lifecycle: the credential is a module singleton and must never
-	// outlive a session — cleared at every session boundary (ADR 0010).
+	// Session lifecycle: the credential is a module singleton, so any session
+	// boundary clears it (ADR 0010) — every session's handlers, not just the one
+	// that filled it, which is what keeps an in-process subordinate session from
+	// inheriting it indefinitely (ADR 0033, Consequences).
 	pi.on("session_start", () => {
 		credentialCache.clear();
 	});

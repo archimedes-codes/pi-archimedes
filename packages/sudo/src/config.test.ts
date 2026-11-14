@@ -27,8 +27,8 @@ describe("sudo config", () => {
 		store.saveCalls.length = 0;
 	});
 
-	it("exposes the shared defaults (15 min TTL, 120 s command timeout)", () => {
-		expect(DEFAULT_SUDO_CONFIG).toEqual({ ttlMs: 900000, defaultTimeoutMs: 120000 });
+	it("exposes the shared defaults (15 min TTL, 120 s command timeout, confirm while cached)", () => {
+		expect(DEFAULT_SUDO_CONFIG).toEqual({ ttlMs: 900000, defaultTimeoutMs: 120000, confirmWhenCached: true });
 	});
 
 	it("returns the defaults when no archimedes.sudo section exists", () => {
@@ -37,11 +37,18 @@ describe("sudo config", () => {
 
 	it("merges a partial archimedes.sudo section over the defaults", () => {
 		store.settings["archimedes.sudo"] = { ttlMs: 5000 };
-		expect(loadSudoConfig()).toEqual({ ttlMs: 5000, defaultTimeoutMs: 120000 });
+		expect(loadSudoConfig()).toEqual({ ttlMs: 5000, defaultTimeoutMs: 120000, confirmWhenCached: true });
+	});
+
+	it("keeps confirming while cached unless the user opts out", () => {
+		store.settings["archimedes.sudo"] = { confirmWhenCached: false };
+		expect(loadSudoConfig().confirmWhenCached).toBe(false);
 	});
 
 	it("saveSudoConfig writes to the archimedes.sudo namespace", () => {
-		saveSudoConfig({ ttlMs: 1234, defaultTimeoutMs: 5678 });
-		expect(store.saveCalls).toEqual([{ namespace: "archimedes.sudo", config: { ttlMs: 1234, defaultTimeoutMs: 5678 } }]);
+		saveSudoConfig({ ttlMs: 1234, defaultTimeoutMs: 5678, confirmWhenCached: true });
+		expect(store.saveCalls).toEqual([
+			{ namespace: "archimedes.sudo", config: { ttlMs: 1234, defaultTimeoutMs: 5678, confirmWhenCached: true } },
+		]);
 	});
 });
