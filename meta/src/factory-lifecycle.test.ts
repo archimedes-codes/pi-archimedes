@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Factory lifecycle: image-paste registration (session_start) vs ─────────
 // teardown (session_shutdown), gated by a *mutable* config that can be
@@ -112,6 +112,7 @@ const { registerDiffTools } = await import("@pi-archimedes/diff");
 const { registerSubagent, registerAgentsCommand } = await import("@pi-archimedes/subagent");
 const { registerWeb } = await import("@pi-archimedes/web");
 const { runOnboarding } = await import("./onboarding/index.js");
+const { registerAsk } = await import("@pi-archimedes/ask");
 
 // ── Stub pi: record pi.on() registrations and command/tool registrations ───
 
@@ -466,7 +467,47 @@ describe("native-paste restore call site (composed suite)", () => {
     expect(vi.mocked(registerImagePaste)).not.toHaveBeenCalled();
     expect(vi.mocked(runNativePasteRestore)).not.toHaveBeenCalled();
   });
+});
 
+describe("ask registration DSA_EXEC guard", () => {
+  const origDsaExec = process.env.DSA_EXEC;
+
+  afterEach(() => {
+    if (origDsaExec === undefined) delete process.env.DSA_EXEC;
+    else process.env.DSA_EXEC = origDsaExec;
+  });
+
+  it("registers ask when ask is enabled and DSA_EXEC is unset", () => {
+    delete process.env.DSA_EXEC;
+    mockStore["archimedes.ask"] = { enabled: true };
+    freshFactory();
+    expect(vi.mocked(registerAsk)).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips ask when DSA_EXEC is set, even if the plugin is enabled", () => {
+    process.env.DSA_EXEC = "1";
+    mockStore["archimedes.ask"] = { enabled: true };
+    freshFactory();
+    expect(vi.mocked(registerAsk)).not.toHaveBeenCalled();
+  });
+
+  it("skips ask when the plugin is disabled regardless of DSA_EXEC", () => {
+    delete process.env.DSA_EXEC;
+    mockStore["archimedes.ask"] = { enabled: false };
+    freshFactory();
+    expect(vi.mocked(registerAsk)).not.toHaveBeenCalled();
+  });
+
+  it("skips ask when both DSA_EXEC is set and the plugin is disabled", () => {
+    process.env.DSA_EXEC = "1";
+    mockStore["archimedes.ask"] = { enabled: false };
+    freshFactory();
+    expect(vi.mocked(registerAsk)).not.toHaveBeenCalled();
+  });
+
+});
+
+describe("native-paste restore: session_start error handling", () => {
   it("session_start still resolves when the restore runner rejects, and the failure is diagnosed — never printed", async () => {
     vi.mocked(runNativePasteRestore).mockRejectedValueOnce(new Error("restore boom"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});

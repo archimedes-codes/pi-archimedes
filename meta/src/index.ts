@@ -85,8 +85,10 @@ export default function (pi: ExtensionAPI): void {
   if (isPluginEnabled("todo")) registerTodo(pi);
   archTime("registerTodo");
 
-  // Register ask tool
-  if (isPluginEnabled("ask")) registerAsk(pi);
+  // Register ask tool.
+  // Skip in a durable-subagents child (DSA_EXEC set): that runtime registers its own `ask`, and two
+  // `ask` tools in one load pass is a fatal conflict that kills every dispatched child at startup.
+  if (isPluginEnabled("ask") && !process.env.DSA_EXEC) registerAsk(pi);
   archTime("registerAsk");
 
   // Register notify
