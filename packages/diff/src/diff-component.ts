@@ -109,7 +109,7 @@ export class DiffComponent implements Component {
 		// If we have resolved raw lines, wrap them in the box
 		if (this._rawLines) {
 			this._updateShell(this._rawLines);
-			const lines = this.shell.render(width);
+			const lines = [...this.shell.render(width)]; // pi-tui 1.6.0: render() is readonly — copy, never widen our own types
 			this._cachedWidth = width;
 			this._cachedLines = lines;
 			return lines;
@@ -118,7 +118,7 @@ export class DiffComponent implements Component {
 		// If we have a pending promise, we haven't resolved yet — show placeholder
 		if (this._renderPromise) {
 			this._updateShell([Ansi.FG_DIM + "  rendering diff…" + Ansi.RST]);
-			return this.shell.render(width);
+			return [...this.shell.render(width)];
 		}
 
 		// Start async render for this width
@@ -147,7 +147,7 @@ export class DiffComponent implements Component {
 
 		// Show placeholder while waiting
 		this._updateShell([Ansi.FG_DIM + "  rendering diff…" + Ansi.RST]);
-		return this.shell.render(width);
+		return [...this.shell.render(width)];
 	}
 
 	private _updateShell(lines: string[]): void {

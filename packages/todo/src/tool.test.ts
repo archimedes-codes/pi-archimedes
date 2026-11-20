@@ -34,7 +34,7 @@ const tool = createManageTodoListTool(new TodoStateManager(), () => {}, {
 
 function renderLines(result: AgentToolResult<TodoDetails | undefined>, expanded: boolean): string {
   const view = tool.renderResult(result, { expanded, isPartial: false }, theme) as {
-    render(width: number): string[];
+    render(width: number): readonly string[];
   };
   expect(view).toBeDefined();
   return view.render(200).map((line) => line.trimEnd()).join("\n");

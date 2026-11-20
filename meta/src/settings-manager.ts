@@ -520,7 +520,7 @@ export function createSettingsManager(opts: SettingsManagerOptions): {
     if (searchInput.getValue() && shownRows().length === 0) {
       return [theme.fg("dim", `  ${NO_MATCHES}`)];
     }
-    const body = list.render(contentWidth);
+    const body = [...list.render(contentWidth)]; // pi-tui 1.6.0: SettingsList.render() is readonly
     // While a field is open the list renders the field in place of the rows, and
     // the description area is part of the list, not of the field.
     if (promptOpen) return body;
