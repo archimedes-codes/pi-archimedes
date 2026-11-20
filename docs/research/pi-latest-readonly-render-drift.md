@@ -140,10 +140,12 @@ new host optimisation wants.
    `--no-bail` is documented on [pnpm.io/cli/recursive](https://pnpm.io/cli/recursive) (default `bail`
    is `true`) but is **absent from `pnpm help recursive` on 12.5.1** even though the binary honours it.
    `--report-summary` works on `-r exec` and emits `pnpm-exec-summary.json` shaped
-   `{ executionStatus: [...] }` — a machine-readable per-package matrix (verified: 13 entries, 3
-   `failure`). Caveat before adopting: with `--no-bail`, pnpm skips tasks that depend on a failed one,
-   which is documented behaviour; `--no-sort` defeated it here, but relying on that to override a
-   documented skip is version-fragile.
+   `{ executionStatus: { "<absolute package path>": { status, duration }, … } }` — an object keyed by
+   package path, not an array (verified: 13 entries, 3 `failure`). A complement to `--no-bail` for a
+   machine-readable failure matrix. Caveat before adopting: with `--no-bail`, pnpm skips tasks that
+   depend on a failed one, which is documented behaviour; `--no-sort` defeated it here, but relying on
+   that to override a documented skip is version-fragile. The file also lands in the working tree and
+   is not gitignored, so adopting it means either gitignoring it or writing it elsewhere.
 2. **A typo'd or renamed specifier exits 0.** `pnpm update -r "@earendil-works/pi-tuiii@latest"` →
    exit 0, `Already up to date`. If pi renames a package, this job tests nothing and stays green
    forever.
