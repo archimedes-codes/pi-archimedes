@@ -9,10 +9,10 @@ on:
   # minor = breaking changes, no major releases" — so breakage arrives without
   # a warning we can encode in a range. Peer ranges are no use either: `pi
   # install` omits peers and the loader aliases the host packages, so a range is
-  # never installed, solved, or parsed. A scheduled type-check against
-  # pi@latest is the only drift detector available, and it has to be on a
-  # schedule: a float job that only runs on PRs stays green while nobody
-  # touches the repo.
+  # never installed, solved, or parsed. A scheduled rehearsal against pi@latest
+  # — type-check and tests — is the only way to know whether the newest train
+  # breaks us, and it has to be on a schedule: a float job that only runs on PRs
+  # stays green while nobody touches the repo.
   schedule:
     # 06:17 UTC daily — an odd minute avoids the scheduled-run queue pileup.
     # GitHub only fires `schedule` on the default branch.
@@ -45,11 +45,17 @@ jobs:
       - name: Test
         run: pnpm test
 
-  # The drift detector: same compile surface against whatever pi publishes
-  # today. Red here means pi changed something under us, not that our tree is
-  # broken — so it runs only on the schedule and on demand, never on a PR,
-  # where an upstream change would turn every open PR red for a reason the
+  # The bump rehearsal: does the suite still work if we move to whatever pi
+  # publishes today? Red here means the bump costs us something, not that our
+  # tree is broken — so it runs only on the schedule and on demand, never on a
+  # PR, where an upstream change would turn every open PR red for a reason the
   # author cannot fix.
+  #
+  # It type-checks AND runs the tests. Type-checking alone asks the narrower
+  # question, and pi encodes only some of its breaking changes in the type
+  # surface: pi-tui 1.6.0's `readonly string[]` was visible to tsc, but the
+  # behaviour it licenses — "components may return a cached array" — is not, and
+  # a render path that mutates a cached array type-checks green and draws wrong.
   pi-latest:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -78,5 +84,52 @@ jobs:
 
       - run: pnpm update -r "@earendil-works/pi-coding-agent@latest" "@earendil-works/pi-tui@latest" "@earendil-works/pi-ai@latest"
 
+      # A rehearsal that doesn't say which pi it rehearsed cannot be read after
+      # the fact: on days when latest equals the pin, `pnpm update` prints
+      # nothing at all, so a green check would not prove anything was floated.
+      # Resolving each name is also the only guard against a rename — `pnpm
+      # update -r` exits 0 when the specifier names a package the workspace does
+      # not declare, so a renamed pi package would leave this job type-checking
+      # the pinned train forever and still report success. `pnpm why` exits 0 on
+      # a miss too, hence the grep. The registry comparison is printed, not
+      # asserted: pi can publish between the update step and this one, and a
+      # schedule-only job must not go red on a race nobody here can fix.
+      - name: Report the pi train under test
+        run: |
+          for p in pi-coding-agent pi-tui pi-ai; do
+            line=$(pnpm why "@earendil-works/$p" 2>/dev/null | head -1)
+            if ! echo "$line" | grep -q "@earendil-works/$p@"; then
+              echo "::error::@earendil-works/$p did not resolve — the specifier is wrong or the package was renamed"
+              exit 1
+            fi
+            want=$(npm view "@earendil-works/$p" version 2>/dev/null || echo unknown)
+            echo "@earendil-works/$p -> ${line#@earendil-works/$p@} (registry latest: $want)"
+          done
+
+      # Not `pnpm -r exec`: recursive exec bails on the first failing package, and
+      # drift does not respect that — the 2026-11-20 run reported packages/diff
+      # while packages/todo and meta were broken too, and meta is last in the
+      # topological walk so it was never reached. `--no-bail` is honoured by the
+      # pinned pnpm but absent from `pnpm help recursive`, and per pnpm's own docs
+      # it skips tasks depending on a failed one, so it still under-reports. A loop
+      # needs no flags and names every package every run. The floor job keeps
+      # `pnpm -r exec`: a floor failure is our own tree, seen locally as we type.
       - name: Type-check all packages against pi@latest
-        run: pnpm -r exec -- tsc --noEmit
+        run: |
+          fail=0
+          for d in packages/*/ meta; do
+            if ! ( cd "$d" && npx tsc --noEmit ); then
+              echo "::error::type-check failed in $d"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # Runs even when the type-check failed, and vitest never type-checks (it
+      # transpiles), so this still reports real drift on a tree that does not
+      # compile. Learning about a type break and a behaviour break in one pass is
+      # the point: the November 1.5.0 break took 47 hours partly because each
+      # round of information cost a whole scheduled run.
+      - name: Test against pi@latest
+        if: ${{ !cancelled() }}
+        run: pnpm test
