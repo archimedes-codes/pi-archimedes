@@ -53,7 +53,7 @@ When a new package is added under `packages/<name>/`, update **all** of these or
 - This is a **pnpm workspace** — always use `pnpm install`, never `npm install`
 - `packageManager` field in root `package.json` pins pnpm via Corepack
 - `workspace:*` protocol in dependencies is pnpm-specific; npm cannot parse it
-- `.npmrc` sets `package-manager-strict=true` and `manage-package-manager-versions=true`
+- `.npmrc` sets `package-manager-strict=true` (that one line is the whole file)
 
 ### Imports
 - **Within a package:** always relative paths (e.g., `from "../chrome.js"`)
@@ -73,7 +73,7 @@ When a new package is added under `packages/<name>/`, update **all** of these or
 - Verification is `tsc --noEmit`, not a build or test command
 
 ### Type-Check Target: pi 1.4.0 (and the `@types/node` hold)
-- Every one of the 13 manifests pins `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` in **`devDependencies` to the exact string `"1.4.0"`** — not a range. The four packages that declare `@earendil-works/pi-ai` pin it to `"1.4.0"` too. Ranges are wrong here on purpose: caret on an 0.x (`^0.87.0`) cannot even resolve `0.87.1`, and the suite once type-checked eleven releases behind what users ran.
+- Every one of the 13 manifests pins `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` in **`devDependencies` to the exact string `"1.4.0"`** — not a range. The three packages that declare `@earendil-works/pi-ai` pin it to `"1.4.0"` too. Ranges are wrong here on purpose: caret on an 0.x (`^0.87.0`) cannot even resolve `0.87.1`, and the suite once type-checked eleven releases behind what users ran.
 - This is a **compile-time** pin only. At runtime pi aliases every host specifier to its own copy (ADR 0026), so the workspace `node_modules` copy is never what executes. `typescript` stays where it is (root `^7.0.2`, packages `^6.0.x`).
 - **`@types/node` is held at `22.19.19`** — pinned exactly in root `devDependencies` (which is what makes `packages/core`'s hoisted `node:fs` compile deterministically) and declared in `packages/subagent` and `packages/web`, matching upstream `pi-coding-agent`'s `devDependencies` pin. Do not "modernise" it to 26.x: under 26.x, `ChildProcess` extends `InternalEventEmitter<ChildProcessEventMap>`, which causes three false `Property 'on' does not exist on type 'ChildProcessWithoutNullStreams'` errors in `packages/image-paste/src/clipboard.ts` and `packages/sudo/src/tool.ts`. Check with `pnpm why @types/node | grep -o "2[0-9]\.[0-9]*\.[0-9]*" | sort -u` (exactly one version).
 
@@ -91,10 +91,11 @@ When a new package is added under `packages/<name>/`, update **all** of these or
 2. If it fails: read the error → read the relevant file → fix → re-run
 3. Loop-break: if a check fails twice without edits between, stop and report BLOCKED
 
-### CI: the floor job and the floating `pi@latest` job
+### CI: the floor job and the `pi@latest` bump rehearsal
 `.github/workflows/ci.yml` has two jobs, and they answer different questions:
 - **`typecheck`** — the floor job: `pnpm install --frozen-lockfile`, `pnpm -r exec -- tsc --noEmit`, `pnpm test`, against *our* pinned 1.4.0. Red means our tree stopped compiling or stopped working.
-- **`pi-latest`** — the drift detector: same compile surface after `pnpm update -r` against whatever `@earendil-works/pi-*@latest` publishes today (with `minimum-release-age 0` set in the runner's project config, because pnpm's 24h policy would otherwise reject the newest pi for its first day — exactly the window the job covers). pi does not follow semver (`patch` and `minor` both ship breaking changes), so this job is the only drift detector available.
+- **`pi-latest`** — the bump rehearsal: after `pnpm update -r` against whatever `@earendil-works/pi-*@latest` publishes today (with `minimum-release-age 0` set in the runner's project config, because pnpm's 24h policy would otherwise reject the newest pi for its first day — exactly the window the job covers), it asks *if we move to that train, does anything break*. pi does not follow semver (`patch` and `minor` both ship breaking changes), so this job is the only rehearsal available. It asks that question twice, because pi encodes only some breaks in the type surface: it type-checks, **and** it runs `pnpm test` (`if: !cancelled()`, since vitest transpiles and never type-checks — a type break still reports the behaviour signal in the same run). Type-checking alone would have missed pi-tui 1.6.0's *meaning*: `readonly string[]` was visible to `tsc`, but the licence it grants — a component may cache and return the same array — is a behaviour change that compiles green.
+- **Every package is checked in its own `tsc` run, and the resolved pi version is printed.** Not `pnpm -r exec`, which bails on the first failing package: the 2026-11-20 run reported `packages/diff` while `packages/todo` and `meta` were broken too, and `meta` is last in the topological walk so it was never reached. Printing the version closes the other silent-green path — on days latest equals the pin, `pnpm update` prints nothing, so a green check proved nothing was floated. The floor job keeps `pnpm -r exec`: a floor failure is our own tree, seen locally as we type.
 - **`pi-latest` is gated to `schedule` and `workflow_dispatch`**, deliberately: a float job that ran on PRs would turn every open PR red for a reason the author cannot fix. So **`pi-latest` showing *SKIPPED* on a pull request is the expected result, not a failure.** To run it on demand: `gh workflow run ci.yml --ref <branch>` (`workflow_dispatch` also lets anyone re-check against today's latest on `main`).
 
 ### Commits
