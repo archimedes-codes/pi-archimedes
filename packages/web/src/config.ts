@@ -4,6 +4,7 @@ import { readEffectiveSettings } from "@pi-archimedes/core/settings-io";
 export interface WebConfig {
   braveApiKey?: string;
   tavilyApiKey?: string;
+  keenableApiKey?: string;
   openaiApiKey?: string;
   perplexityApiKey?: string;
   searxngUrl?: string;
@@ -32,6 +33,7 @@ export function loadConfig(pi?: ExtensionAPI): WebConfig {
   return {
     braveApiKey: process.env.BRAVE_API_KEY || config.braveApiKey,
     tavilyApiKey: process.env.TAVILY_API_KEY || config.tavilyApiKey,
+    keenableApiKey: process.env.KEENABLE_API_KEY || config.keenableApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
     perplexityApiKey: process.env.PERPLEXITY_API_KEY || config.perplexityApiKey,
     searxngUrl: process.env.SEARXNG_URL || config.searxngUrl,

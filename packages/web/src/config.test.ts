@@ -31,6 +31,7 @@ const settingsPath = () => join(tempDir, "settings.json");
 const ENV_KEYS = [
   "BRAVE_API_KEY",
   "TAVILY_API_KEY",
+  "KEENABLE_API_KEY",
   "OPENAI_API_KEY",
   "PERPLEXITY_API_KEY",
   "SEARXNG_URL",

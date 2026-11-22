@@ -119,6 +119,7 @@ export function registerTools(pi: ExtensionAPI) {
       try {
         search = await executeSearch(queries, {
           ...(params.numResults !== undefined && { numResults: params.numResults }),
+          ...(params.provider !== undefined && { provider: params.provider }),
           ...(params.recencyFilter !== undefined && { recencyFilter: params.recencyFilter }),
           ...(params.domainFilter !== undefined && { domainFilter: params.domainFilter }),
           ...(proxy !== undefined && { proxy }),

@@ -4,6 +4,7 @@ import { BraveProvider } from './brave.js';
 import { TavilyProvider } from './tavily.js';
 import { PerplexityProvider } from './perplexity.js';
 import { SearXNGProvider } from './searxng.js';
+import { KeenableProvider } from './keenable.js';
 import pLimit from 'p-limit';
 
 const ALL_PROVIDERS: SearchProvider[] = [
@@ -14,14 +15,22 @@ const ALL_PROVIDERS: SearchProvider[] = [
   DuckDuckGoProvider
 ];
 
+// Providers picked only by id (`provider` or `defaultProvider`), never by the
+// auto chain below. Keenable needs no key, so it is always "available" and
+// would otherwise jump ahead of the DuckDuckGo fallback.
+const OPT_IN_PROVIDERS: SearchProvider[] = [KeenableProvider];
+
+const findProvider = (id: string): SearchProvider | undefined =>
+  ALL_PROVIDERS.find(p => p.id === id) ?? OPT_IN_PROVIDERS.find(p => p.id === id);
+
 export const resolveProvider = (requested: string | undefined, config: WebConfig): SearchProvider => {
   if (requested) {
-    const provider = ALL_PROVIDERS.find(p => p.id === requested);
+    const provider = findProvider(requested);
     if (provider) return provider;
   }
   
   if (config.defaultProvider && config.defaultProvider !== 'auto') {
-    const provider = ALL_PROVIDERS.find(p => p.id === config.defaultProvider);
+    const provider = findProvider(config.defaultProvider);
     if (provider && provider.isAvailable(config)) return provider;
   }
 
