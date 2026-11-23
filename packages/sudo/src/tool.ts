@@ -379,6 +379,37 @@ export async function probeSudoPassword(
 }
 
 /**
+ * Validate a password the user just typed, for `/sudo auth` pre-authorization.
+ *
+ * This is `probeSudoPassword` with `-k`, and the difference is the whole point:
+ * `sudo -v` with a still-valid TICKET refreshes it and exits 0 **without ever
+ * reading stdin**, so the non-invalidating probe above answers "is this user
+ * currently privileged", not "is this password correct". For the diagnostic
+ * path that distinction is exactly right (it must not revoke a working
+ * ticket). For pre-authorization it would cache a typo and report it as
+ * verified — the failure only surfaces later, when the ticket expires and
+ * every privileged command starts failing inside a window the user believes is
+ * open (ADR 0034).
+ *
+ * `-k` discards the timestamp first, so sudo must read the password from stdin
+ * and genuinely check it. Accepted side effect: a FAILED check leaves the
+ * user's previous ticket discarded. That is the price of a real answer, and it
+ * costs nothing that matters — the next `sudo -S` command supplies a password
+ * from the credential cache anyway, so a fresh ticket is re-established on
+ * first use. A NOPASSWD policy still exits 0 without a password, which is
+ * correct: sudo says this user needs none.
+ */
+export async function probeSudoPasswordStrict(
+	password: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	spawner: SudoSpawner,
+): Promise<boolean> {
+	const run = await runSudo(["sudo", "-k", "-S", "-v", "-p", ""], password, timeoutMs, signal, spawner);
+	return !run.timedOut && run.error === undefined && run.exitCode === 0;
+}
+
+/**
  * Belt-and-braces: drop any line that contains the raw password so it can
  * never appear in tool details/result content (normally stderr is clean —
  * the password never appears in argv — but scrub defensively).

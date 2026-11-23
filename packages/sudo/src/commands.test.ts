@@ -40,18 +40,18 @@ vi.mock("./prompt.js", async (importOriginal) => ({
 	}),
 }));
 
-// tool mock: probeSudoPassword returns `probeResult`; defaultSpawner is never
-// actually invoked because the probe is mocked.
+// tool mock: probeSudoPasswordStrict returns `probeResult`; defaultSpawner is
+// never actually invoked because the probe is mocked.
 const toolState = vi.hoisted(() => ({ probeResult: true }));
 vi.mock("./tool.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("./tool.js")>()),
-	probeSudoPassword: vi.fn(async () => toolState.probeResult),
+	probeSudoPasswordStrict: vi.fn(async () => toolState.probeResult),
 	defaultSpawner: vi.fn(() => {
 		throw new Error("defaultSpawner must not be called — the probe is mocked");
 	}),
 }));
 
-import { probeSudoPassword } from "./tool.js";
+import { probeSudoPasswordStrict } from "./tool.js";
 
 interface FakePi {
 	pi: ExtensionAPI;
@@ -93,7 +93,7 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		promptState.typedPassword = "";
 		promptState.prompted = 0;
 		toolState.probeResult = true;
-		vi.mocked(probeSudoPassword).mockClear();
+		vi.mocked(probeSudoPasswordStrict).mockClear();
 		const fake = fakePi();
 		registerSudo(fake.pi);
 		def = fake.commands.get("sudo") as { handler: Function; getArgumentCompletions?: Function };
@@ -110,7 +110,7 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		await def.handler("auth", ctx);
 
 		expect(promptState.prompted).toBe(1);
-		expect(probeSudoPassword).toHaveBeenCalledTimes(1);
+		expect(probeSudoPasswordStrict).toHaveBeenCalledTimes(1);
 		const entry = credentialCache.get();
 		expect(entry?.password).toBe("hunter2");
 		expect(notified[0]).toContain("verified and cached");
@@ -225,16 +225,26 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		expect(items.map((i) => i.value).sort()).toEqual(["auth", "forget", "ttl"]);
 	});
 
-	it("completions offer TTL presets at the second level of auth and ttl", () => {
-		const authItems = def.getArgumentCompletions?.("auth ") as Array<{ value: string }>;
-		expect(authItems.map((i) => i.value)).toContain("1h");
+	it("completions carry the subcommand in their VALUE — pi replaces the whole argument string", () => {
+		const authItems = def.getArgumentCompletions?.("auth ") as Array<{ value: string; label: string }>;
+		expect(authItems.map((i) => i.value)).toContain("auth 1h");
+		expect(authItems.find((i) => i.value === "auth 1h")?.label).toBe("1h");
 		const ttlItems = def.getArgumentCompletions?.("ttl ") as Array<{ value: string }>;
-		expect(ttlItems.map((i) => i.value)).toContain("default");
+		expect(ttlItems.map((i) => i.value)).toContain("ttl default");
 	});
 
-	it("completions filter by the typed prefix", () => {
-		const items = def.getArgumentCompletions?.("f") as Array<{ value: string }>;
-		expect(items.map((i) => i.value)).toEqual(["forget"]);
+	it("completions offer `default` for ttl only — it is not a duration", () => {
+		const authItems = def.getArgumentCompletions?.("auth ") as Array<{ value: string }>;
+		expect(authItems.map((i) => i.value)).not.toContain("auth default");
+		const ttlItems = def.getArgumentCompletions?.("ttl ") as Array<{ value: string }>;
+		expect(ttlItems.map((i) => i.value)).toContain("ttl default");
+	});
+
+	it("completions filter by the typed prefix at both levels", () => {
+		const firstLevel = def.getArgumentCompletions?.("f") as Array<{ value: string }>;
+		expect(firstLevel.map((i) => i.value)).toEqual(["forget"]);
+		const secondLevel = def.getArgumentCompletions?.("ttl 1") as Array<{ value: string }>;
+		expect(secondLevel.map((i) => i.value)).toEqual(["ttl 15m", "ttl 1h"]);
 	});
 
 	it("completions stop at the second level (deep args belong to the handler)", () => {

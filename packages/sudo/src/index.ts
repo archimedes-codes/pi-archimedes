@@ -6,7 +6,7 @@ import { DEFAULT_SUDO_CONFIG, loadSudoConfig, saveSudoConfig, type SudoConfig } 
 import { formatDuration, parseDuration } from "./duration.js";
 import { handleBashToolCall, isInteractiveSudoAttempt, type GuardResult } from "./guard.js";
 import { confirmCommand, maskLine, promptForPassword } from "./prompt.js";
-import { buildSudoArgv, createSudoExecTool, defaultSpawner, probeSudoPassword, registerSudoTool, scrubSecret, type SudoSpawner } from "./tool.js";
+import { buildSudoArgv, createSudoExecTool, defaultSpawner, probeSudoPasswordStrict, registerSudoTool, scrubSecret, type SudoSpawner } from "./tool.js";
 
 /** Presets offered by the second-level completions and the interactive TTL picker. */
 const TTL_PRESETS = ["15m", "30m", "1h", "4h", "8h"] as const;
@@ -109,7 +109,7 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 			ctx.ui.notify("Cancelled — nothing was validated or cached.", "info");
 			return;
 		}
-		const ok = await probeSudoPassword(password, AUTH_PROBE_TIMEOUT_MS, undefined, defaultSpawner);
+		const ok = await probeSudoPasswordStrict(password, AUTH_PROBE_TIMEOUT_MS, undefined, defaultSpawner);
 		if (!ok) {
 			ctx.ui.notify("Sudo rejected that password — nothing was cached.", "error");
 			return;
@@ -134,9 +134,21 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 				// typed. A second word fully typed ("auth 2h") or a third word is
 				// deep enough — let the handler speak.
 				if (tail === undefined || parts.length > 2) return null;
-				const items = [...TTL_PRESETS, "default"]
+				// `default` is a `ttl` word only: `auth default` is not a duration.
+				const choices = head === "ttl" ? [...TTL_PRESETS, "default"] : [...TTL_PRESETS];
+				const items = choices
 					.filter((v) => v.startsWith(tail))
-					.map((value) => ({ value, label: value, description: value === "default" ? "reset to the package default (15m)" : `TTL preset — ${formatDuration(parseDuration(value) ?? 0)}` }));
+					// pi REPLACES the whole argument string with the chosen `value`,
+					// so the subcommand has to be part of it — a bare "1h" would
+					// produce `/sudo 1h` and the handler rejects the unknown word.
+					.map((value) => ({
+						value: `${head} ${value}`,
+						label: value,
+						description:
+							value === "default"
+								? "reset to the package default (15m)"
+								: `TTL preset — ${formatDuration(parseDuration(value) ?? 0)}`,
+					}));
 				return items.length > 0 ? items : null;
 			}
 			const items = [
