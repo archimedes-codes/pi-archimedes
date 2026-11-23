@@ -73,7 +73,8 @@ export interface SudoChild {
 
 export type SudoSpawner = (command: string, args: string[], options?: { detached: boolean }) => SudoChild;
 
-const defaultSpawner: SudoSpawner = (command, args, options) => spawn(command, args, options);
+/** The real process spawner; injectable in tests, used directly by /sudo auth. */
+export const defaultSpawner: SudoSpawner = (command, args, options) => spawn(command, args, options);
 
 /** Short delay before the ONE retry of a transient group-kill failure. */
 const GROUP_KILL_RETRY_DELAY_MS = 50;

@@ -11,10 +11,24 @@
  * I/O is mocked out: fake `pi` records `on()`/`registerCommand()` calls,
  * fake ctx carries a `ui.notify` spy.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { credentialCache } from "./cache.js";
 import { registerSudo } from "./index.js";
+
+// Mock core/settings-io — the /sudo state line and the ttl subcommand read
+// and WRITE the archimedes.sudo namespace; without this mock the tests would
+// touch the user's real ~/.pi/agent/settings.json.
+const settingsStore = vi.hoisted(() => ({ settings: {} as Record<string, Record<string, unknown>> }));
+vi.mock("@pi-archimedes/core/settings-io", () => ({
+	loadConfig: (namespace: string, defaults: Record<string, unknown>) => ({
+		...defaults,
+		...settingsStore.settings[namespace],
+	}),
+	saveConfig: (namespace: string, config: Record<string, unknown>) => {
+		settingsStore.settings[namespace] = config;
+	},
+}));
 
 interface FakePi {
 	pi: ExtensionAPI;
@@ -66,6 +80,9 @@ function lastHandler(fake: FakePi, event: string): Function {
 }
 
 describe("registerSudo — session lifecycle + /sudo command", () => {
+	beforeEach(() => {
+		for (const key of Object.keys(settingsStore.settings)) delete settingsStore.settings[key];
+	});
 	afterEach(() => {
 		credentialCache.clear();
 	});
@@ -113,7 +130,7 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 
 		const def = fake.commands.get("sudo");
 		expect(def).toBeDefined();
-		expect(def!.description).toBe("Manage the sudo credential cache");
+		expect(def!.description).toContain("auth | ttl | forget");
 
 		credentialCache.set("hunter2", 900_000);
 		expect(credentialCache.get()).not.toBeNull();
@@ -122,7 +139,7 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 		await def!.handler("forget", ctx);
 
 		expect(credentialCache.get()).toBeNull();
-		expect(notified).toEqual(["Sudo credential cleared."]);
+		expect(notified).toEqual(["Sudo credential cleared — expired immediately."]);
 	});
 
 	it("responds to an unknown /sudo subcommand with usage info — no exception, cache unchanged", async () => {
@@ -134,7 +151,9 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 		const { ctx, notified } = fakeCtx();
 		await expect(def.handler("noop", ctx)).resolves.toBeUndefined(); // must not throw
 
-		expect(notified).toEqual(["Unknown /sudo subcommand. Usage: /sudo, /sudo forget"]);
+		expect(notified).toEqual([
+			'Unknown /sudo subcommand "noop". Usage: /sudo [auth [ttl] | ttl [duration|default] | forget]',
+		]);
 		expect(credentialCache.get()).not.toBeNull(); // live credential untouched
 	});
 
@@ -146,13 +165,14 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 		// Not cached.
 		const notCached = fakeCtx();
 		await def.handler("", notCached.ctx);
-		expect(notCached.notified).toEqual(["No sudo credential cached."]);
+		expect(notCached.notified[0]).toContain("No valid sudo credential cached");
 
 		// Cached (live entry).
 		credentialCache.set("hunter2", 900_000);
 		const cached = fakeCtx();
 		await def.handler("", cached.ctx);
-		expect(cached.notified).toEqual(["Sudo credential cached."]);
+		expect(cached.notified[0]).toContain("Sudo credential cached —");
+		expect(cached.notified[0]).toContain("15m remaining");
 		expect(credentialCache.get()).not.toBeNull();
 
 		// Expired entry reads as not-cached (get() is expiry-aware).
@@ -160,6 +180,6 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 		await new Promise((r) => setTimeout(r, 5));
 		const expired = fakeCtx();
 		await def.handler("", expired.ctx);
-		expect(expired.notified).toEqual(["No sudo credential cached."]);
+		expect(expired.notified[0]).toContain("No valid sudo credential cached");
 	});
 });

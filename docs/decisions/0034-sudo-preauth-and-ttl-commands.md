@@ -1,0 +1,46 @@
+---
+status: accepted
+date: 2026-11-24
+superseded-by:
+---
+
+# Pre-authorized credentials, a duration-typed TTL, and immediate expiry
+
+The credential cache (ADR 0010) has an awkward asymmetry: the moment the password is asked for is decided **by the model's first privileged command**, not by the human who owns the credential. In a session where the user knows work needs root — a package install, a unit restart — they wait for the agent to reach that step, get a confirmation dialog and a masked prompt mid-task, and then the meaning of the TTL is "fifteen minutes from whenever the agent happened to ask". Nothing about the credential was ever the model's to choose, yet the model chose the start of its window.
+
+The same asymmetry makes `ttlMs` a JSON-only setting with no runtime surface. Changing it means editing `~/.pi/agent/settings.json` and restarting or `/reload`; there is no way to see how long the current credential has left, and no way to shorten one whose grant turned out to be larger than intended. `/sudo forget` (immediate expiry) and the JSON `ttlMs` are the whole command surface today.
+
+We decided to extend the `/sudo` command family rather than the tool schema, so the human keeps both decisions — **whether** to authorize and **for how long** — and the model gains nothing:
+
+```
+/sudo                      # state: cached? how long left? what is the default TTL?
+/sudo auth [duration]      # pre-authorize now: masked prompt → validated → cached
+/sudo ttl [duration|default]  # show/set/reset the DEFAULT TTL (persisted)
+/sudo forget               # expire the cached credential immediately
+```
+
+- **`/sudo auth [duration]`** opens the same masked prompt `sudo_exec` uses, validates the typed password with the same no-program `sudo -S -v` probe the tool already runs on ambiguous failures (ADR 0032), and only then caches it — with an optional one-off duration argument (`auth 2h30m`). A `duration` argument changes **this** window only; without it the configured default applies. A cancelled prompt or a rejected password caches nothing. The credential that results is byte-for-byte the one `sudo_exec` would have created: same cache, same TTL semantics, same clearing rules, same ADR 0033 gate policy. The only difference is who started the clock.
+- **`/sudo ttl <duration>`** persists `ttlMs` (the same key the README documents) *and* re-times a live cached entry to the new duration from now, so "make it 1h" means the current credential too. **`/sudo ttl default`** resets to the package default (`DEFAULT_SUDO_CONFIG.ttlMs`). A bare **`/sudo ttl`** opens an interactive picker (the TUI path for selecting a default), while the argument form is headless-safe — which matters because `/sudo auth` and `/sudo ttl` are also the natural thing to run from a scripted setup.
+- **`/sudo forget`** keeps its exact current meaning (the password is dropped from memory entirely) and its message now also names the outcome: expired immediately. Immediate expiry was already implemented; what was missing was any way to *say* "not now, but not never" — `ttl` gives that, `forget` gives the hard stop.
+- **Second-level completions** for every subcommand, plus TTL presets. Without them `/sudo ` shows nothing, so the subcommands are invisible to anyone who does not read the README: the trailing space that should open a submenu produces no candidates, and the handler receives whatever was typed as one opaque string. The completion function is also what makes the presets discoverable (`15m, 30m, 1h, 4h, 8h, default`).
+
+Durations are parsed by a small pure function (`15m`, `2h30m`, `1d12h`, `500ms`, or a plain millisecond count), capped at 30 days, rejecting zero, negatives and stray characters. A bad duration is a usage message, never an exception.
+
+**Considered Options**
+
+- **A `sudo_exec` parameter (`ttlMs`, or `preAuthorize`).** Rejected on the same ground ADR 0033 rejected a per-run confirmation parameter: it would let the model set the size of the window on a credential only the human can supply, and the credential's lifetime is a human risk decision.
+- **Pre-authorization at `session_start`, automatically.** Rejected: prompting for a password the user did not ask to give — every session start, before any privileged work exists — turns a deliberate act into a reflex, and train users to type the password without reading it. `/sudo auth` is the same capability, one keystroke away, with the intent recorded in the transcript.
+- **A separate `/sudo-auth` command instead of `/sudo auth`.** Rejected: it splits one concept (the credential cache) across two top-level names, and the state command cannot then describe the full set of things you can do to it. `/sudo` becomes the single entry point; its bare form keeps reporting state.
+- **Store the TTL on the cached entry only, not in settings.** Rejected: the user's answer to "how long should a credential last" is a preference that should survive the process. `ttlMs` already exists; `ttl <duration>` writes it through `saveSudoConfig` rather than inventing a parallel key.
+- **Have `/sudo auth` skip confirmation (`confirmWhenCached: true` still gates `sudo_exec`).** Not a choice we made — `/sudo auth` never confirms, because there is no command to confirm, and it deliberately does **not** touch `confirmWhenCached`. Pre-authorizing changes who starts the clock, not whether a privileged command is confirmed; with the default `true` the gate is intact, and a user who has chosen `false` has already accepted unattended runs inside the window.
+- **Make `parseDuration` accept `session` as an alias for "until shutdown".** Rejected for now: the cache is process-scoped (ADR 0033), so a "session" duration would be a lie in exactly the multi-session process the README warns about. A 30-day cap plus an honest `/sudo forget` is simpler than a keyword whose meaning depends on session topology.
+
+**Consequences**
+
+The user can open a credential window before the agent needs it, size it explicitly, see the time remaining, shrink it, and close it — all without editing JSON. The model still cannot create, extend or inspect a credential: no tool parameter, no tool result, nothing in the transcript except what the human typed.
+
+`/sudo auth` and `/sudo ttl` are human acts, so the masking and validation guarantees of ADR 0010 carry over unchanged — the password reaches sudo over stdin only, is never written to disk, and a failed validation caches nothing. Pre-authorization moves **when** the password is typed; it does not change **where it goes** or how it is verified.
+
+`rettl` re-times an entry without reading or rewriting the password, and it re-times an expired-but-present entry too: the password is the user's own cached secret, `get()` reporting it absent is a read-side expiry, and `/sudo ttl` is an explicit human decision about that secret. It does not reset `failStreak` — extending a window is not evidence that a suspicious credential became trustworthy.
+
+The TTL is still per **process** (ADR 0033), so `/sudo ttl session`-style mental models remain wrong; the README says so next to `ttlMs`. Coverage pins the parser (units, compound forms, the 30-day cap, every rejection shape), the cache `rettl` contract (live, expired-present, empty cache, `failStreak` untouched), the command layer (auth happy path with and without a duration, cancelled prompt, rejected password, `ttl` show/set/reset with and without a live entry, the interactive picker and its cancellation, unknown subcommands), and the completion function at both levels including the deep-argument stop.

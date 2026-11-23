@@ -42,6 +42,20 @@ export class CredentialCache {
 		this.entry = null;
 	}
 
+	/**
+	 * Re-time an EXISTING cached entry to a new TTL (from now). The password is
+	 * NOT touched and never leaves the cache — this is how `/sudo ttl <d>`
+	 * extends or shortens a live credential without re-prompting. Returns false
+	 * (a no-op) when nothing is cached at all; an expired-but-present entry is
+	 * still re-timed — the password is the user's own cached secret and
+	 * `/sudo ttl` is an explicit human act on it.
+	 */
+	rettl(ttlMs: number): boolean {
+		if (this.entry === null) return false;
+		this.entry.expiresAt = Date.now() + ttlMs;
+		return true;
+	}
+
 	/** Bump the current entry's failStreak (no-op when the cache is empty). */
 	bumpFailStreak(): void {
 		if (this.entry !== null) this.entry.failStreak += 1;

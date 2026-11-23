@@ -32,7 +32,7 @@ After installing Pi, choose one installation command above, then `cd` into your 
 - **Optional quieter confirmation** — `confirmWhenCached: false` skips the per-command confirmation while a credential is already cached, so an approved credential window is not interrupted by one dialog per privileged step. Off by default, and a skipped run says so in its own output — the first line of the tool result is `[sudo] confirmation skipped …`, so the terminal, the transcript and the model all see that nobody confirmed it ([ADR 0033](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0033-sudo-confirmation-while-cached.md)).
 - **Masked password prompt** — the password is typed into a masked UI and passed to sudo via stdin only. It is never in argv, environment variables, command logs, or the LLM context.
 - **Defensive output scrubbing** — command output lines that contain the password are redacted before they reach the tool result. That is a literal-substring scrub: it catches common cases, and it is **not** universal leak protection.
-- **Credential cache** — a single in-memory cache with a TTL (15 minutes by default, `ttlMs`); cleared on authentication failure, at `session_start`/`session_shutdown`, and by `/sudo forget`.
+- **Credential cache** — a single in-memory cache with a TTL (15 minutes by default, `ttlMs`); cleared on authentication failure, at `session_start`/`session_shutdown`, and by `/sudo forget`. Pre-authorize with `/sudo auth [duration]` and resize with `/sudo ttl` ([ADR 0034](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0034-sudo-preauth-and-ttl-commands.md)).
 - **Timeout/abort cleanup** — on timeout or abort, the tool attempts to kill the command's entire process group, falling back to the direct sudo process, so root children, not just the direct sudo process, are the target of the cleanup. Deliberately detached descendants (`setsid`, daemonising) leave the process group and are outside its scope — use a flag to keep the child a process in the group (e.g. `--foreground`).
 - **Headless sessions refused** — `sudo_exec` requires an interactive (TUI) session; subagent and headless sessions get a clear error instead of a prompt. The masked prompt only ever appears in front of a human.
 - **Active bash guard** — a `tool_call` veto on the built-in `bash` tool (per [ADR 0010](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0010-archimedes-sudo-security.md)) blocks interactive `sudo`, funneling privileged execution toward `sudo_exec`.
@@ -60,8 +60,12 @@ The guard is a **heuristic with accepted residual bypasses** documented in the [
 
 ## Commands
 
-- `/sudo` — report whether a credential is currently cached in memory.
-- `/sudo forget` — flush the cached credential immediately.
+- `/sudo` — report the cache state: whether a credential is cached, how long it has left, and the default TTL.
+- `/sudo auth [duration]` — **pre-authorize now**: masked prompt, validated with the same `sudo -S -v` probe the tool uses, then cached. The optional `duration` (`auth 2h30m`, `auth 90s`) sizes **this** window only; without it the configured `ttlMs` applies. A cancelled prompt or a rejected password caches nothing. Use it when you know privileged work is coming, instead of waiting for the first `sudo_exec` dialog to ask ([ADR 0034](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0034-sudo-preauth-and-ttl-commands.md)).
+- `/sudo ttl [duration|default]` — with a duration, persist it as the new default `ttlMs` **and** re-time a live cached credential to match; `default` resets to the package default (15m); bare opens an interactive picker. The argument form is headless-safe.
+- `/sudo forget` — expire the cached credential immediately (dropped from memory).
+
+All four support second-level tab completion, including TTL presets, so `/sudo ` shows what it accepts.
 
 ## Settings
 
@@ -69,7 +73,7 @@ The guard is a **heuristic with accepted residual bypasses** documented in the [
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `ttlMs` | number | `900000` | Password cache TTL in milliseconds (default 15 minutes) |
+| `ttlMs` | number | `900000` | Password cache TTL in milliseconds (default 15 minutes). Also what `/sudo ttl <duration>` writes; `/sudo ttl` without an argument re-times a live credential too |
 | `defaultTimeoutMs` | number | `120000` | `sudo_exec` default command timeout in milliseconds (default 120 seconds) |
 | `confirmWhenCached` | boolean | `true` | Ask for confirmation before every `sudo_exec`, even with a cached credential. Set to `false` to confirm only when a password will be requested — that is, whenever the credential cache is empty — and skip it for a cached credential; the skipped run then starts its output with the `[sudo] confirmation skipped` marker and sets `confirmationSkipped: true` in the details. Keep `ttlMs` short if you enable this: the cache, not the session, is what bounds unattended privileged runs ([ADR 0033](https://github.com/archimedes-codes/pi-archimedes/blob/main/docs/decisions/0033-sudo-confirmation-while-cached.md)) |
 

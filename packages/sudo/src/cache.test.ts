@@ -89,3 +89,46 @@ describe("CredentialCache", () => {
 		expect(cache.get()?.failStreak).toBe(0);
 	});
 });
+
+describe("CredentialCache.rettl", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("re-times a live entry from now without touching the password", () => {
+		const cache = new CredentialCache();
+		cache.set("hunter2", TTL);
+		vi.advanceTimersByTime(30_000);
+		expect(cache.rettl(120_000)).toBe(true);
+		const got = cache.get();
+		expect(got?.password).toBe("hunter2");
+		expect(got?.expiresAt).toBe(Date.now() + 120_000);
+	});
+
+	it("re-times an expired-but-present entry back to life (explicit human act)", () => {
+		const cache = new CredentialCache();
+		cache.set("hunter2", TTL);
+		vi.advanceTimersByTime(TTL + 1);
+		expect(cache.get()).toBeNull(); // reads as absent
+		expect(cache.rettl(60_000)).toBe(true);
+		expect(cache.get()?.password).toBe("hunter2");
+	});
+
+	it("is a no-op on an empty cache and returns false", () => {
+		const cache = new CredentialCache();
+		expect(cache.rettl(60_000)).toBe(false);
+		expect(cache.get()).toBeNull();
+	});
+
+	it("does not reset the fail streak", () => {
+		const cache = new CredentialCache();
+		cache.set("hunter2", TTL);
+		cache.bumpFailStreak();
+		cache.bumpFailStreak();
+		cache.rettl(120_000);
+		expect(cache.get()?.failStreak).toBe(2);
+	});
+});

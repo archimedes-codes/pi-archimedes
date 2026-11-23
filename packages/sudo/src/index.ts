@@ -3,9 +3,15 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { credentialCache } from "./cache.js";
 import { splitCommandIntoArgv } from "./argv-split.js";
 import { DEFAULT_SUDO_CONFIG, loadSudoConfig, saveSudoConfig, type SudoConfig } from "./config.js";
+import { formatDuration, parseDuration } from "./duration.js";
 import { handleBashToolCall, isInteractiveSudoAttempt, type GuardResult } from "./guard.js";
 import { confirmCommand, maskLine, promptForPassword } from "./prompt.js";
-import { buildSudoArgv, createSudoExecTool, registerSudoTool, scrubSecret, type SudoSpawner } from "./tool.js";
+import { buildSudoArgv, createSudoExecTool, defaultSpawner, probeSudoPassword, registerSudoTool, scrubSecret, type SudoSpawner } from "./tool.js";
+
+/** Presets offered by the second-level completions and the interactive TTL picker. */
+const TTL_PRESETS = ["15m", "30m", "1h", "4h", "8h"] as const;
+/** Validation timeout for the pre-authorization probe — a wrong password fails in well under this. */
+const AUTH_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Registers `sudo_exec` (Task 1), the bash-sudo guard (Task 2) — a
@@ -32,28 +38,141 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 		credentialCache.clear();
 	});
 
-	// /sudo — manage the credential cache (v1: state + forget, JSON-only config).
+	/** Human-readable state line shared by bare `/sudo` and the subcommands. */
+	const stateLine = (): string => {
+		const entry = credentialCache.get();
+		if (entry === null) {
+			const stale = credentialCache.isExpired ? " (expired — re-prompts on next use)" : "";
+			return `No valid sudo credential cached${stale}. Default TTL: ${formatDuration(loadSudoConfig().ttlMs)} (\`/sudo auth\` to pre-authorize).`;
+		}
+		return `Sudo credential cached — ${formatDuration(entry.expiresAt - Date.now())} remaining. Default TTL: ${formatDuration(loadSudoConfig().ttlMs)}.`;
+	};
+
+	/**
+	 * `/sudo ttl [duration|default]` — show, set (persistently), or reset the
+	 * default TTL, and re-time a live cached entry to match. A bare `/sudo ttl`
+	 * opens the interactive picker; a duration argument sets directly.
+	 */
+	const runTtl = async (arg: string, ctx: ExtensionCommandContext): Promise<void> => {
+		if (arg === "") {
+			// Interactive picker — the TUI path for feature 2. Persisted via
+			// saveSudoConfig; the same result is reachable non-interactively via
+			// `/sudo ttl <duration>` (headless-safe).
+			const choice = await ctx.ui.select("Sudo credential default TTL", [...TTL_PRESETS, "cancel"]);
+			if (choice === undefined || choice === "cancel") return;
+			await runTtl(choice, ctx);
+			return;
+		}
+		if (arg === "default") {
+			const config = loadSudoConfig();
+			saveSudoConfig({ ...config, ttlMs: DEFAULT_SUDO_CONFIG.ttlMs });
+			if (credentialCache.rettl(DEFAULT_SUDO_CONFIG.ttlMs)) {
+				ctx.ui.notify(`TTL reset to the default ${formatDuration(DEFAULT_SUDO_CONFIG.ttlMs)}; the cached credential was re-timed to match.`, "info");
+			} else {
+				ctx.ui.notify(`TTL reset to the default ${formatDuration(DEFAULT_SUDO_CONFIG.ttlMs)}.`, "info");
+			}
+			return;
+		}
+		const ttlMs = parseDuration(arg);
+		if (ttlMs === null) {
+			ctx.ui.notify(`Not a duration: "${arg}". Use e.g. 15m, 2h30m, 1d, or "default" to reset.`, "error");
+			return;
+		}
+		saveSudoConfig({ ...loadSudoConfig(), ttlMs });
+		if (credentialCache.rettl(ttlMs)) {
+			ctx.ui.notify(`Default TTL set to ${formatDuration(ttlMs)}; the cached credential was re-timed to match.`, "info");
+		} else {
+			ctx.ui.notify(`Default TTL set to ${formatDuration(ttlMs)}.`, "info");
+		}
+	};
+
+	/**
+	 * `/sudo auth [duration]` — pre-authorize NOW: masked prompt, the password
+	 * validated with the same no-program `sudo -S -v` probe the tool uses, then
+	 * cached with an optional one-off TTL. This is the user acting, not the
+	 * model: the credential and its window are created exactly as if the user
+	 * had typed the password into the first `sudo_exec` prompt, just earlier
+	 * and with an explicit duration (ADR 0034).
+	 */
+	const runAuth = async (arg: string, ctx: ExtensionCommandContext): Promise<void> => {
+		let ttlMs = loadSudoConfig().ttlMs;
+		if (arg !== "") {
+			const parsed = parseDuration(arg);
+			if (parsed === null) {
+				ctx.ui.notify(`Not a duration: "${arg}". Use e.g. /sudo auth 2h30m, or /sudo auth for the default TTL.`, "error");
+				return;
+			}
+			ttlMs = parsed;
+		}
+		const password = await promptForPassword(ctx, "", "pre-authorization — the password is validated and cached; it never enters the conversation");
+		if (!password) {
+			ctx.ui.notify("Cancelled — nothing was validated or cached.", "info");
+			return;
+		}
+		const ok = await probeSudoPassword(password, AUTH_PROBE_TIMEOUT_MS, undefined, defaultSpawner);
+		if (!ok) {
+			ctx.ui.notify("Sudo rejected that password — nothing was cached.", "error");
+			return;
+		}
+		credentialCache.set(password, ttlMs);
+		ctx.ui.notify(`Sudo credential verified and cached — ${formatDuration(ttlMs)} from now. /sudo forget expires it immediately.`, "info");
+	};
+
+	// /sudo — credential cache management. Bare: state. Subcommands: auth
+	// (pre-authorize, optional one-off TTL), ttl (show/set/reset the default,
+	// re-timing a live entry), forget (expire immediately). Second-level
+	// completions make the subcommands discoverable from the TUI — without
+	// them, `/sudo ` shows no candidates and the subcommands stay invisible.
 	pi.registerCommand("sudo", {
-		description: "Manage the sudo credential cache",
+		description: "Manage the sudo credential cache (auth | ttl | forget)",
+		getArgumentCompletions: (prefix: string) => {
+			const parts = prefix.split(/\s+/);
+			const head = parts[0] ?? "";
+			const tail = parts.length > 1 ? parts.slice(1).join(" ") : undefined;
+			if (head === "auth" || head === "ttl") {
+				// Second level ("auth ", "auth 1"): TTL presets, filtered by what's
+				// typed. A second word fully typed ("auth 2h") or a third word is
+				// deep enough — let the handler speak.
+				if (tail === undefined || parts.length > 2) return null;
+				const items = [...TTL_PRESETS, "default"]
+					.filter((v) => v.startsWith(tail))
+					.map((value) => ({ value, label: value, description: value === "default" ? "reset to the package default (15m)" : `TTL preset — ${formatDuration(parseDuration(value) ?? 0)}` }));
+				return items.length > 0 ? items : null;
+			}
+			const items = [
+				{ value: "auth", label: "auth", description: "pre-authorize now — validate and cache the password (optional TTL, e.g. auth 2h)" },
+				{ value: "ttl", label: "ttl", description: "show/set/reset the default TTL (e.g. ttl 1h, ttl default)" },
+				{ value: "forget", label: "forget", description: "expire the cached credential immediately" },
+			].filter((i) => i.value.startsWith(head));
+			return items.length > 0 ? items : null;
+		},
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
 			const args = _args.trim();
-			if (args === "forget") {
-				credentialCache.clear();
-				ctx.ui.notify("Sudo credential cleared.", "info");
-				return;
+			const space = args.indexOf(" ");
+			const sub = space === -1 ? args : args.slice(0, space);
+			const rest = space === -1 ? "" : args.slice(space + 1).trim();
+			switch (sub) {
+				case "":
+					// Bare: report state. get() is expiry-aware, so a stale entry reads
+					// as "not cached" (it re-prompts on next use) without being dropped.
+					ctx.ui.notify(stateLine(), "info");
+					return;
+				case "auth":
+					await runAuth(rest, ctx);
+					return;
+				case "ttl":
+					await runTtl(rest, ctx);
+					return;
+				case "forget":
+					// Immediate expiry (ADR 0034): the cached password is dropped from
+					// memory entirely — the existing semantics, unchanged.
+					credentialCache.clear();
+					ctx.ui.notify("Sudo credential cleared — expired immediately.", "info");
+					return;
+				default:
+					ctx.ui.notify(`Unknown /sudo subcommand "${sub}". Usage: /sudo [auth [ttl] | ttl [duration|default] | forget]`, "error");
+					return;
 			}
-			if (args !== "") {
-				ctx.ui.notify("Unknown /sudo subcommand. Usage: /sudo, /sudo forget", "info");
-				return;
-			}
-			// Bare: report state. get() is expiry-aware, so a stale entry reads
-			// as "not cached" (it re-prompts on next use) without being dropped.
-			ctx.ui.notify(
-				credentialCache.get() !== null
-					? "Sudo credential cached."
-					: "No sudo credential cached.",
-				"info",
-			);
 		},
 	});
 }
