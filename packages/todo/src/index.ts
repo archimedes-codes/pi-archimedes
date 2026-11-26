@@ -11,16 +11,16 @@ export default function (pi: ExtensionAPI): void {
 }
 
 export function registerTodo(pi: ExtensionAPI): void {
-  const state = new TodoStateManager();
   const subagentTodos = new Map<string, TodoItem[]>();
   const unsubscribes: Array<() => void> = [];
   let currentCtx: ExtensionContext | undefined;
+  const state = new TodoStateManager(refreshWidget);
 
-  const refreshWidget = () => {
+  function refreshWidget(): void {
     if (currentCtx) {
       updateWidget(state, currentCtx, subagentTodos);
     }
-  };
+  }
 
   // Subscribe on the host handle for subagent todos. Registered here, at
   // extension-load time, not inside a session handler: the host drops these

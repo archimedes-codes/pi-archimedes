@@ -62,6 +62,30 @@ describe("TodoStateManager", () => {
       vi.advanceTimersByTime(2000);
       expect(manager.read()).toHaveLength(2);
     });
+
+    it("notifies after automatic clear", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+
+      notifyingManager.write([makeTodo("Done", "completed")]);
+      vi.advanceTimersByTime(2000);
+
+      expect(notifyingManager.read()).toEqual([]);
+      expect(onAutoClear).toHaveBeenCalledOnce();
+    });
+
+    it("cancels an older auto-clear when a newer list is written", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+
+      notifyingManager.write([makeTodo("Done", "completed")]);
+      vi.advanceTimersByTime(1000);
+      notifyingManager.write([makeTodo("New work", "pending")]);
+      vi.advanceTimersByTime(1000);
+
+      expect(notifyingManager.read()).toEqual([makeTodo("New work", "pending")]);
+      expect(onAutoClear).not.toHaveBeenCalled();
+    });
   });
 
   describe("clear", () => {
@@ -69,6 +93,29 @@ describe("TodoStateManager", () => {
       manager.write([makeTodo("Task", "pending")]);
       manager.clear();
       expect(manager.read()).toEqual([]);
+    });
+
+    it("does not notify when cleared manually", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+
+      notifyingManager.write([makeTodo("Done", "completed")]);
+      notifyingManager.clear();
+      vi.advanceTimersByTime(2000);
+
+      expect(onAutoClear).not.toHaveBeenCalled();
+    });
+
+    it("cancelAutoClear prevents a scheduled clear", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+
+      notifyingManager.write([makeTodo("Done", "completed")]);
+      notifyingManager.cancelAutoClear();
+      vi.advanceTimersByTime(2000);
+
+      expect(notifyingManager.read()).toEqual([makeTodo("Done", "completed")]);
+      expect(onAutoClear).not.toHaveBeenCalled();
     });
   });
 
@@ -221,6 +268,36 @@ describe("TodoStateManager", () => {
       ]);
       manager.loadFromSession(ctx as never);
       expect(manager.read()).toEqual([{ content: "Good", status: "pending" }]);
+    });
+
+    it("schedules auto-clear for the latest restored completed list", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+      const ctx = fakeCtx([
+        toolResultEntry({ todos: [{ content: "Earlier", status: "pending" }] }),
+        toolResultEntry({ todos: [{ content: "Latest", status: "completed" }] }),
+      ]);
+
+      notifyingManager.loadFromSession(ctx as never);
+      expect(notifyingManager.read()).toEqual([{ content: "Latest", status: "completed" }]);
+
+      vi.advanceTimersByTime(2000);
+      expect(notifyingManager.read()).toEqual([]);
+      expect(onAutoClear).toHaveBeenCalledOnce();
+    });
+
+    it("keeps a restored pending list", () => {
+      const onAutoClear = vi.fn();
+      const notifyingManager = new TodoStateManager(onAutoClear);
+      const ctx = fakeCtx([
+        toolResultEntry({ todos: [{ content: "Still open", status: "pending" }] }),
+      ]);
+
+      notifyingManager.loadFromSession(ctx as never);
+      vi.advanceTimersByTime(2000);
+
+      expect(notifyingManager.read()).toEqual([{ content: "Still open", status: "pending" }]);
+      expect(onAutoClear).not.toHaveBeenCalled();
     });
   });
 });

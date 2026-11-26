@@ -7,6 +7,8 @@ export class TodoStateManager {
   private todos: TodoItem[] = [];
   private autoClearTimer: ReturnType<typeof setTimeout> | undefined;
 
+  constructor(private readonly onAutoClear?: () => void) {}
+
   read(): TodoItem[] {
     return [...this.todos];
   }
@@ -16,7 +18,10 @@ export class TodoStateManager {
     this.todos = todos.map((t) => ({ ...t }));
     // If all completed and non-empty, schedule auto-clear
     if (todos.length > 0 && todos.every((t) => t.status === "completed")) {
-      this.scheduleAutoClear(() => this.clear());
+      this.scheduleAutoClear(() => {
+        this.todos = [];
+        this.onAutoClear?.();
+      });
     }
   }
 
@@ -60,7 +65,7 @@ export class TodoStateManager {
   }
 
   loadFromSession(ctx: ExtensionContext): void {
-    this.todos = [];
+    let restored: TodoItem[] = [];
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "message") continue;
       const msg = entry.message;
@@ -72,9 +77,10 @@ export class TodoStateManager {
       // leave state untouched for that entry.
       const items = normalizeTodoItems(details?.todos);
       if (items) {
-        this.todos = items.map((t) => ({ ...t }));
+        restored = items;
       }
     }
+    this.write(restored);
   }
 
   scheduleAutoClear(callback: () => void): void {
