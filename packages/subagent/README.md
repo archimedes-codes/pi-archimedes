@@ -97,6 +97,16 @@ Independent tasks go in a `tasks` array — mix defined agents and config-less t
 }
 ```
 
+### Public live-status snapshots
+
+The package publishes the display-only `pi:background-tasks` v1 protocol with `source: "pi-archimedes"`. Dashboards can show current work without reading tool events or gaining control over a run. Each live task has a stable `<toolCallId>:<index>` ID, a label for existing consumers, and optional `name`, `task`, and `transcript` fields. `transcript` repeats the useful content from the Archimedes row: tool calls with their running, success, or error status and argument preview, followed by accumulated assistant output with its line breaks intact. It contains no controls or private host objects.
+
+The bounds are measured in JavaScript characters. A snapshot has at most 64 tasks. IDs and session IDs are capped at 200 characters, names at 64, labels at 160, details at 320, task prompts at 16,384, and transcripts at 65,536 per task. The combined `name`, `task`, and `transcript` text in one snapshot is capped at 2,097,152 characters. A clipped transcript ends with `[transcript truncated]` when the available cap has room for the marker.
+
+Task state remains `starting` or `running`. Live progress also supplies the input, output, and cost values it knows. Usage is marked partial because the progress stream does not expose every public usage field.
+
+A consumer can request the current snapshot by emitting `pi:background-tasks:request` with `{ version: 1, sessionId }`. The publisher answers only for the matching session. Finished, failed, and cancelled tasks leave the snapshot; use the Archimedes subagent tool row and result for authoritative status. Snapshots never expose run controls.
+
 ## The `/agents` command
 
 Available with the suite (and subagent enabled), `/agents` opens the interactive manager: a searchable list, model and tool pickers, cross-scope collision warnings, and dirty-tracking on save.

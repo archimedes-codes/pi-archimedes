@@ -19,6 +19,14 @@ import {
 } from "./tool-validation.js";
 import { resolveThinkingLevel } from "./thinking-validation.js";
 import { toNativeUsage, sumNativeUsage } from "./usage.js";
+import {
+  BACKGROUND_TASKS_CHANNEL,
+  BACKGROUND_TASKS_REQUEST_CHANNEL,
+  backgroundTaskId,
+  backgroundTaskSnapshot,
+  isBackgroundTaskRequest,
+  type LiveSubagentTask,
+} from "./background-tasks.js";
 import type {
   SubagentDetails,
   SubagentProgress,
@@ -43,6 +51,130 @@ export function registerSubagent(pi: ExtensionAPI): void {
   // tool must still show up in /plugins. Entry point for both meta and the
   // standalone default export, so `registerAgentsCommand` needs no second call.
   reportPiSupport("subagent", "1.2.0");
+
+  // This state belongs to this registration and therefore to this host
+  // session. Pi can keep the imported module alive across unrelated sessions,
+  // so none of it may move to module scope (AGENTS.md session-state rule).
+  let backgroundSessionId: string | undefined;
+  const liveBackgroundTasks = new Map<string, LiveSubagentTask>();
+
+  const emitBackgroundSnapshot = (sessionId = backgroundSessionId): void => {
+    if (!sessionId) return;
+    try {
+      pi.events.emit(
+        BACKGROUND_TASKS_CHANNEL,
+        backgroundTaskSnapshot(sessionId, liveBackgroundTasks.values()),
+      );
+    } catch {
+      // The protocol is optional display output. A broken listener must never
+      // affect a child run or extension lifecycle.
+    }
+  };
+
+  const clearBackgroundSession = (): void => {
+    const previousSessionId = backgroundSessionId;
+    liveBackgroundTasks.clear();
+    if (previousSessionId) emitBackgroundSnapshot(previousSessionId);
+  };
+
+  const sessionIdFrom = (ctx: ExtensionContext): string | undefined => {
+    try {
+      const sessionId = ctx.sessionManager.getSessionId?.();
+      return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const adoptBackgroundSession = (ctx: ExtensionContext): boolean => {
+    const nextSessionId = sessionIdFrom(ctx);
+    if (!nextSessionId) return false;
+    if (backgroundSessionId && backgroundSessionId !== nextSessionId) {
+      clearBackgroundSession();
+    }
+    backgroundSessionId = nextSessionId;
+    return true;
+  };
+
+  let unsubscribeBackgroundRequests: (() => void) | undefined;
+  try {
+    unsubscribeBackgroundRequests = pi.events.on(BACKGROUND_TASKS_REQUEST_CHANNEL, (value: unknown) => {
+      if (!isBackgroundTaskRequest(value) || value.sessionId !== backgroundSessionId) return;
+      emitBackgroundSnapshot();
+    });
+  } catch {
+    // Older or partially disposed hosts may not provide a usable event bus.
+    // Dispatch still works without the display protocol.
+  }
+
+  // Standalone installs register before session_start. The suite registers
+  // this package from its own session_start handler, so execute() also adopts
+  // the current ctx before publishing the first live row.
+  pi.on("session_start", (_event, ctx) => {
+    const nextSessionId = sessionIdFrom(ctx);
+    if (!nextSessionId || (backgroundSessionId && backgroundSessionId !== nextSessionId)) return;
+    clearBackgroundSession();
+    backgroundSessionId = nextSessionId;
+    emitBackgroundSnapshot();
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (!backgroundSessionId || sessionIdFrom(ctx) !== backgroundSessionId) return;
+    clearBackgroundSession();
+    backgroundSessionId = undefined;
+    try {
+      unsubscribeBackgroundRequests?.();
+    } catch {
+      // The event runtime may already be disposed during reload/shutdown.
+    }
+    unsubscribeBackgroundRequests = undefined;
+  });
+
+  const beginBackgroundTasks = (
+    ctx: ExtensionContext,
+    toolCallId: string,
+    runs: Array<{ agent: string | undefined; task: string; model: string | undefined }>,
+  ): { update: (progress: SubagentProgress[]) => void; finish: () => void } => {
+    const ids = runs.map((_run, index) => backgroundTaskId(toolCallId, index));
+    if (!adoptBackgroundSession(ctx)) {
+      return { update: () => {}, finish: () => {} };
+    }
+    const startedAt = Date.now();
+    runs.forEach((run, index) => {
+      liveBackgroundTasks.set(ids[index]!, {
+        id: ids[index]!,
+        agent: run.agent ?? "subagent",
+        task: run.task,
+        state: "starting",
+        startedAt,
+        ...(run.model ? { model: run.model } : {}),
+      });
+    });
+    let active = true;
+    emitBackgroundSnapshot();
+    return {
+      update(progress) {
+        if (!active) return;
+        progress.forEach((item, index) => {
+          const id = ids[index];
+          const current = id ? liveBackgroundTasks.get(id) : undefined;
+          if (!current) return;
+          if (item.status === "running") {
+            liveBackgroundTasks.set(id!, { ...current, state: "running", progress: item });
+          } else {
+            liveBackgroundTasks.delete(id!);
+          }
+        });
+        emitBackgroundSnapshot();
+      },
+      finish() {
+        if (!active) return;
+        active = false;
+        for (const id of ids) liveBackgroundTasks.delete(id);
+        emitBackgroundSnapshot();
+      },
+    };
+  };
 
   pi.registerTool({
     name: "subagent",
@@ -133,31 +265,46 @@ export function registerSubagent(pi: ExtensionAPI): void {
           );
           warnUnknownThinkingLevel(ctx, warnedThinking, t.agent ? findAgent(agents, t.agent)?.thinking : undefined);
         }
-        const results: SubagentResult[] = await executeParallel({
-          tasks: params.tasks.map((t) => ({
-            agent: t.agent ?? undefined,
-            agentConfig: t.agent ? findAgent(agents, t.agent) : undefined,
-            task: t.task,
-            model: t.model,
-            activeModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-            cwd: t.cwd ?? undefined,
-            // All N tasks share the single subagent tool-call's id (the frame
-            // carries it for Client correlation).
-            toolCallId: _id,
-          })),
-          signal: signal ?? undefined,
-          events: pi.events,
-          onUpdate: (progress: SubagentProgress[]) => {
-            onUpdate?.({
-              content: [],
-              details: {
-                mode: "parallel",
-                results: [],
-                progress,
-              },
-            });
-          },
-        });
+        const executionTasks = params.tasks.map((t) => ({
+          agent: t.agent ?? undefined,
+          agentConfig: t.agent ? findAgent(agents, t.agent) : undefined,
+          task: t.task,
+          model: t.model,
+          activeModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+          cwd: t.cwd ?? undefined,
+          // All N tasks share the single subagent tool-call's id (the frame
+          // carries it for Client correlation).
+          toolCallId: _id,
+        }));
+        const background = beginBackgroundTasks(ctx, _id, executionTasks.map((task) => ({
+          agent: task.agent,
+          task: task.task,
+          model: task.agentConfig?.model ?? task.model ?? task.activeModel,
+        })));
+        const abortBackground = () => background.finish();
+        signal?.addEventListener("abort", abortBackground, { once: true });
+        let results: SubagentResult[];
+        try {
+          results = await executeParallel({
+            tasks: executionTasks,
+            signal: signal ?? undefined,
+            events: pi.events,
+            onUpdate: (progress: SubagentProgress[]) => {
+              background.update(progress);
+              onUpdate?.({
+                content: [],
+                details: {
+                  mode: "parallel",
+                  results: [],
+                  progress,
+                },
+              });
+            },
+          });
+        } finally {
+          signal?.removeEventListener("abort", abortBackground);
+          background.finish();
+        }
 
         const nativeUsage = sumNativeUsage(results);
         return {
@@ -219,27 +366,42 @@ export function registerSubagent(pi: ExtensionAPI): void {
         }
         warnUnavailableTools(pi, ctx, new Set(), params.agent ?? "subagent", agentConfig?.tools);
         warnUnknownThinkingLevel(ctx, new Set(), agentConfig?.thinking);
-        const result: SubagentResult = await executeSubagent({
-          agent: params.agent ?? undefined,
-          agentConfig,
+        const activeModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+        const background = beginBackgroundTasks(ctx, _id, [{
+          agent: params.agent,
           task: params.task,
-          model: params.model,
-          activeModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-          cwd: params.cwd ?? undefined,
-          signal: signal ?? undefined,
-          events: pi.events,
-          toolCallId: _id,
-          onUpdate: (progress: SubagentProgress) => {
-            onUpdate?.({
-              content: [],
-              details: {
-                mode: "single",
-                results: [],
-                progress: [progress],
-              },
-            });
-          },
-        });
+          model: agentConfig?.model ?? params.model ?? activeModel,
+        }]);
+        const abortBackground = () => background.finish();
+        signal?.addEventListener("abort", abortBackground, { once: true });
+        let result: SubagentResult;
+        try {
+          result = await executeSubagent({
+            agent: params.agent ?? undefined,
+            agentConfig,
+            task: params.task,
+            model: params.model,
+            activeModel,
+            cwd: params.cwd ?? undefined,
+            signal: signal ?? undefined,
+            events: pi.events,
+            toolCallId: _id,
+            onUpdate: (progress: SubagentProgress) => {
+              background.update([progress]);
+              onUpdate?.({
+                content: [],
+                details: {
+                  mode: "single",
+                  results: [],
+                  progress: [progress],
+                },
+              });
+            },
+          });
+        } finally {
+          signal?.removeEventListener("abort", abortBackground);
+          background.finish();
+        }
 
         return {
           content: [{ type: "text", text: formatSingleResult(result) }],

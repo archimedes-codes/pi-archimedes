@@ -1,7 +1,7 @@
 ---
 status: live
-last-verified: 2026-10-15
-verified-by: reading the render path in full for this pass — `packages/subagent/src/row-block.ts`, `compact.ts`, `expanded.ts`, `render.ts`, plus `tool-schema.ts` (parameters and `structuredContent`) and `index.ts` (registration, both tool results, `renderCall`/`renderResult`) — and re-checking the rest of the doc's claims against their sources: `spawn.ts` (the argv it builds, `startAskSocketServer`), `stream.ts` (stderr capture, `manage_todo_list`), `execute.ts` (`resolveModel`, `Promise.all`), `run-outcome.ts` (the decision order in `decideRunOutcome()`), `usage.ts`, `agents.ts` (scopes, `toolsError`, `applyLocalOverrides`), `agent-store.ts`, `local-config.ts`, `agent-panel.ts` (dirty mark, collision warning), `dispatch.ts` (the fallback rule), `format.ts` (`buildOutcomeLine`) and `types.ts` (`outcome` optional at `:38`, `:70`, `:134`), against pi 1.2.0 — `@earendil-works/pi-coding-agent@1.2.0` and `@earendil-works/pi-tui@1.2.0` as installed, with the pi-tui primitives the rows use (`sliceByColumn`, `wrapTextWithAnsi`, `visibleWidth`, `truncateToWidth`) confirmed in its export surface and pi's `VisualLinePreview` confirmed unreachable through the package's export map (`.` and `./rpc-entry`; the deep path raises `ERR_PACKAGE_PATH_NOT_EXPORTED`) — and its shipped `examples/extensions/subagent/` (index.ts, agents.ts, README.md, `agents/`, `prompts/`), and for the cost claim against pi's own accounting path (`createToolResultMessage` in `pi-agent-core/dist/agent-loop.js`, the `role === "toolResult"` branch of `AgentSession.getSessionStats()` in `dist/core/agent-session.js`), claim by claim, on 2026-10-15; the suite's tests (`TMPDIR=/home/daniel/.tmp/vitest npx vitest run` — 2504 tests / 148 files, including `row-block.test.ts`, `compact.test.ts`, `expanded.test.ts`, `tool-row.width-audit.test.ts`, `tool-schema.test.ts`, `run-outcome.test.ts`, `usage.test.ts`, `spawn.test.ts`, `dispatch.test.ts`, `local-config.test.ts`, `tool-validation.test.ts`, `agents-parse.test.ts`) and `pnpm -r exec -- tsc --noEmit` clean in all 13 workspace projects. Not verified in this pass: a live dispatch, or any row drawn on a real terminal (see "Not verified in this pass").
+last-verified: 2026-11-26
+verified-by: the background-task section was checked against `packages/subagent/src/background-tasks.ts`, the register-scoped lifecycle in `index.ts`, the host 1.4.0 `EventBus` declarations and implementation, and `background-tasks.test.ts` on 2026-11-26; the prior full feature verification remains the 2026-10-15 source and test pass described below. That pass read `packages/subagent/src/row-block.ts`, `compact.ts`, `expanded.ts`, `render.ts`, `tool-schema.ts`, `index.ts`, `spawn.ts`, `stream.ts`, `execute.ts`, `run-outcome.ts`, `usage.ts`, `agents.ts`, `agent-store.ts`, `local-config.ts`, `agent-panel.ts`, `dispatch.ts`, `format.ts`, and `types.ts` against pi 1.2.0, plus pi's shipped subagent example and accounting path. It ran 2504 tests across 148 files and type-checked all 13 workspace projects. A live dispatch and real-terminal rendering were not checked in either pass.
 ---
 
 # Subagent (`@pi-archimedes/subagent`)
@@ -45,6 +45,20 @@ Agents are Markdown files with YAML frontmatter (`name` and `description` requir
 `subagent` is declared `exposure: "model-only"`: it is not reachable from a codemode script, while `list_agents` stays callable (`packages/subagent/src/index.ts`).
 
 The package warns at load if the host is below its floor (`reportPiSupport("subagent", "1.2.0")`), because its behaviour depends on host semantics rather than only on types — `docs/decisions/0026-pi-version-contract-runtime-floor.md`.
+
+## Public background-task protocol
+
+`packages/subagent/src/background-tasks.ts` defines the display-only `pi:background-tasks` v1 snapshot. Its source is `pi-archimedes`, and every snapshot belongs to one Pi session. A matching `{ version: 1, sessionId }` event on `pi:background-tasks:request` returns the current snapshot.
+
+Only live runs appear. A task starts in `starting`, moves to `running` with progress, and disappears on completion, failure, cancellation, replacement, reload, or shutdown. The protocol does not infer an `idle` state. IDs are stable within the tool call: `<toolCallId>:<index>` for both single and parallel dispatches.
+
+The original `label` remains for v1 consumers. Three optional fields carry the confirmed richer display: `name` is the agent name, `task` is the bounded full prompt, and `transcript` contains the progress available to Archimedes. Transcript tool rows use the same `▸`, `✓`, and `✗` status vocabulary as the TUI, include bounded argument previews, then append the accumulated assistant output. Assistant paragraphs and line breaks remain readable. ANSI sequences and terminal controls are removed, and the publisher selects only public progress strings rather than copying host objects.
+
+All limits are JavaScript character counts. A snapshot contains at most 64 tasks. IDs and session IDs are capped at 200 characters, names at 64, labels at 160, details at 320, task prompts at 16,384, and transcripts at 65,536 per task. The combined `name`, `task`, and `transcript` text in one snapshot is capped at 2,097,152 characters. Transcript clipping adds `[transcript truncated]` when the remaining cap can hold it. Detail names the model and current tool and points readers to the Archimedes subagent tool row for the authoritative result. It does not advertise controls.
+
+Live progress supplies public usage keys `input`, `output`, and `cost`. The snapshot marks them with `usagePartial: true` because `SubagentProgress` has no cache-read or cache-write counters. Terminal runs do not remain as history or accounting rows.
+
+The live map, current session ID, and request unsubscriber live in `registerSubagent()`'s registration closure. Every emit is guarded, so a consumer that throws cannot fail dispatch. Validation errors publish no task. Abort and `finally` paths remove the tool call's rows and publish the resulting snapshot.
 
 ## The tool row is either a row or a block
 

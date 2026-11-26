@@ -78,7 +78,7 @@ Then run `/reload` in your session (or start a new one) to pick it up — that r
 
 ## Give your agent some backup.
 
-Have one subagent explore the codebase while another reviews your changes. [Subagents](packages/subagent/README.md) run with your choice of models and tools, stream their progress live into your terminal, and their tasks show up side by side on the [shared todo board](packages/todo/README.md).
+Have one subagent explore the codebase while another reviews your changes. [Subagents](packages/subagent/README.md) run with your choice of models and tools, stream their progress live into your terminal, and their tasks show up side by side on the [shared todo board](packages/todo/README.md). Display extensions can also read bounded, session-scoped live status through the public `pi:background-tasks` v1 protocol.
 
 Their token usage and costs feed into the same status bar. More work happening at once, without losing sight of it.
 
