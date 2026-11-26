@@ -210,8 +210,8 @@ export async function executeParallel(options: {
   }));
 
   const results = await Promise.all(
-    options.tasks.map((taskDef, index) =>
-      executeSubagent({
+    options.tasks.map(async (taskDef, index) => {
+      const result = await executeSubagent({
         ...taskDef,
         signal: options.signal,
         events: options.events,
@@ -221,8 +221,18 @@ export async function executeParallel(options: {
           // Emit all N entries in stable task order.
           options.onUpdate?.([...latestProgress]);
         },
-      }),
-    ),
+      });
+      // Bridge dispatches only publish their initial running placeholder.
+      // Publish the authoritative result as soon as this task settles rather
+      // than leaving its slot running until Promise.all waits for every peer.
+      // Fork runs may repeat their final streaming update here; that is safer
+      // than inventing a terminal state when a result has no progress.
+      if (result.progress) {
+        latestProgress[index] = result.progress;
+        options.onUpdate?.([...latestProgress]);
+      }
+      return result;
+    }),
   );
   return results;
 }

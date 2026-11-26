@@ -13,6 +13,7 @@ export const MAX_BACKGROUND_TASK = 16 * 1024;
 export const MAX_BACKGROUND_TRANSCRIPT = 64 * 1024;
 export const MAX_BACKGROUND_SNAPSHOT_TEXT = 2 * 1024 * 1024;
 export const MAX_BACKGROUND_SESSION_ID = 200;
+export const MAX_BACKGROUND_SANITIZE_SCAN = MAX_BACKGROUND_TRANSCRIPT * 2 + 256;
 
 const MAX_TRANSCRIPT_TOOL_NAME = 128;
 const MAX_TRANSCRIPT_ARGS = 2 * 1024;
@@ -58,11 +59,19 @@ export interface LiveSubagentTask {
   startedAt: number;
   model?: string;
   progress?: SubagentProgress;
+  /** Per-run memo. The run object is owned by one registerSubagent closure. */
+  snapshotCache?: {
+    key: readonly unknown[];
+    task: BackgroundTask;
+  };
 }
 
 /** Remove terminal controls while retaining readable dialogue line breaks. */
-function withoutTerminalControls(value: string): string {
-  return value
+function withoutTerminalControls(value: string, outputLimit: number): string {
+  // Sanitization is regex-heavy. Cap its input before any replacement so an
+  // accumulated multi-megabyte output cannot be rescanned on every heartbeat.
+  const scanLimit = Math.min(MAX_BACKGROUND_SANITIZE_SCAN, outputLimit * 2 + 256);
+  return value.slice(0, scanLimit)
     // OSC, including hyperlinks and title changes.
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
     // CSI and the remaining two-byte escape forms.
@@ -76,7 +85,7 @@ function withoutTerminalControls(value: string): string {
 
 /** Remove line breaks where the v1 field is defined as one display row. */
 function boundedLine(value: string | undefined, limit: number, fallback: string): string {
-  const line = withoutTerminalControls(value ?? "")
+  const line = withoutTerminalControls(value ?? "", limit)
     .replace(/\n+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -84,15 +93,18 @@ function boundedLine(value: string | undefined, limit: number, fallback: string)
 }
 
 function boundedText(value: string | undefined, limit: number): string | undefined {
-  const text = withoutTerminalControls(value ?? "").trim();
+  const text = withoutTerminalControls(value ?? "", limit).trim();
   if (!text) return undefined;
   return text.slice(0, limit);
 }
 
 function boundedTranscript(value: string | undefined, limit: number): string | undefined {
-  const text = withoutTerminalControls(value ?? "").trim();
+  const raw = value ?? "";
+  const scanLimit = Math.min(MAX_BACKGROUND_SANITIZE_SCAN, limit * 2 + 256);
+  const inputWasClipped = raw.length > scanLimit;
+  const text = withoutTerminalControls(raw, limit).trim();
   if (!text) return undefined;
-  if (text.length <= limit) return text;
+  if (text.length <= limit && !inputWasClipped) return text;
   if (limit <= TRANSCRIPT_TRUNCATION_MARKER.length) return text.slice(0, limit);
   return text.slice(0, limit - TRANSCRIPT_TRUNCATION_MARKER.length) + TRANSCRIPT_TRUNCATION_MARKER;
 }
@@ -139,7 +151,43 @@ export function backgroundTaskId(toolCallId: string, index: number): string {
   return `${prefix}${suffix}`;
 }
 
+function backgroundTaskCacheKey(run: LiveSubagentTask): readonly unknown[] {
+  const progress = run.progress;
+  const lastToolCall = progress?.toolCalls?.at(-1);
+  return [
+    run.id,
+    run.agent,
+    run.task,
+    run.state,
+    run.startedAt,
+    run.model,
+    progress?.agent,
+    progress?.task,
+    progress?.model,
+    progress?.currentTool,
+    progress?.currentToolArgs,
+    progress?.toolCount,
+    progress?.inputTokens,
+    progress?.outputTokens,
+    progress?.cost,
+    progress?.output,
+    progress?.toolCalls,
+    progress?.toolCalls?.length,
+    lastToolCall?.name,
+    lastToolCall?.argsPreview,
+    lastToolCall?.error,
+  ];
+}
+
+function sameCacheKey(left: readonly unknown[], right: readonly unknown[]): boolean {
+  return left.length === right.length && left.every((value, index) => Object.is(value, right[index]));
+}
+
 export function toBackgroundTask(run: LiveSubagentTask): BackgroundTask {
+  const cacheKey = backgroundTaskCacheKey(run);
+  if (run.snapshotCache && sameCacheKey(run.snapshotCache.key, cacheKey)) {
+    return run.snapshotCache.task;
+  }
   const name = boundedLine(run.progress?.agent ?? run.agent, MAX_BACKGROUND_NAME, "subagent");
   const labelAgent = name.slice(0, 48);
   const task = boundedLine(run.progress?.task ?? run.task, MAX_BACKGROUND_LABEL, "task");
@@ -154,7 +202,7 @@ export function toBackgroundTask(run: LiveSubagentTask): BackgroundTask {
   const usage = knownUsage(run.progress);
   const fullTask = boundedText(run.progress?.task ?? run.task, MAX_BACKGROUND_TASK);
   const transcript = transcriptFor(run.progress);
-  return {
+  const taskResult: BackgroundTask = {
     id: boundedLine(run.id, MAX_BACKGROUND_ID, "subagent"),
     kind: "subagent",
     label,
@@ -166,6 +214,8 @@ export function toBackgroundTask(run: LiveSubagentTask): BackgroundTask {
     ...(usage ? { usage, usagePartial: true as const } : {}),
     detail,
   };
+  run.snapshotCache = { key: cacheKey, task: taskResult };
+  return taskResult;
 }
 
 export function backgroundTaskSnapshot(
@@ -176,15 +226,23 @@ export function backgroundTaskSnapshot(
   let textRemaining = MAX_BACKGROUND_SNAPSHOT_TEXT;
   for (const run of runs) {
     if (tasks.length >= MAX_BACKGROUND_TASKS) break;
-    const task = toBackgroundTask(run);
+    let task = toBackgroundTask(run);
+    let writable = false;
+    const makeWritable = (): void => {
+      if (writable) return;
+      task = { ...task };
+      writable = true;
+    };
     for (const field of ["name", "task", "transcript"] as const) {
       const value = task[field];
       if (value === undefined) continue;
       if (textRemaining <= 0) {
+        makeWritable();
         delete task[field];
         continue;
       }
       if (value.length > textRemaining) {
+        makeWritable();
         const clipped = field === "transcript"
           ? boundedTranscript(value, textRemaining)
           : boundedText(value, textRemaining);

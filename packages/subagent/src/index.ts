@@ -160,7 +160,11 @@ export function registerSubagent(pi: ExtensionAPI): void {
           const current = id ? liveBackgroundTasks.get(id) : undefined;
           if (!current) return;
           if (item.status === "running") {
-            liveBackgroundTasks.set(id!, { ...current, state: "running", progress: item });
+            // Keep the registration-owned run object stable so its snapshot
+            // memo survives heartbeat publications. Display-relevant changes
+            // are detected by the memo key in background-tasks.ts.
+            current.state = "running";
+            current.progress = item;
           } else {
             liveBackgroundTasks.delete(id!);
           }

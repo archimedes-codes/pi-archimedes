@@ -6,6 +6,7 @@ import {
   MAX_BACKGROUND_DETAIL,
   MAX_BACKGROUND_LABEL,
   MAX_BACKGROUND_NAME,
+  MAX_BACKGROUND_SANITIZE_SCAN,
   MAX_BACKGROUND_SNAPSHOT_TEXT,
   MAX_BACKGROUND_TASK,
   MAX_BACKGROUND_TASKS,
@@ -358,5 +359,77 @@ describe("public background-task protocol", () => {
     const longCall = "x".repeat(300);
     expect(backgroundTaskId(longCall, 0)).not.toBe(backgroundTaskId(longCall, 1));
     expect(backgroundTaskId(longCall, 63)).toHaveLength(200);
+  });
+
+  it("reuses unchanged rendering and invalidates usage, tool, output, and state changes", () => {
+    const toolCalls = [{ name: "read", argsPreview: "one.ts", error: false }];
+    const run: LiveSubagentTask = {
+      id: "memo:0",
+      agent: "reviewer",
+      task: "review",
+      state: "running",
+      startedAt: 1,
+      model: "test/model",
+      progress: progress({ output: "first", toolCalls }),
+    };
+
+    const first = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    const heartbeat = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(heartbeat).toBe(first);
+
+    run.progress = { ...run.progress!, durationMs: run.progress!.durationMs + 1000 };
+    const durationOnlyHeartbeat = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(durationOnlyHeartbeat).toBe(first);
+
+    run.progress = progress({
+      currentTool: "write",
+      currentToolArgs: "two.ts",
+      inputTokens: 1400,
+      outputTokens: 100,
+      cost: 0.06,
+      output: "second",
+      toolCalls: [...toolCalls, { name: "write", argsPreview: "two.ts", error: false }],
+    });
+    const changedProgress = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(changedProgress).not.toBe(first);
+    expect(changedProgress).toMatchObject({ usage: { input: 1400, output: 100, cost: 0.06 } });
+    expect(changedProgress.detail).toContain("Tool: write");
+    expect(changedProgress.transcript).toContain("second");
+    expect(changedProgress.transcript).toContain("write: two.ts");
+
+    run.progress.toolCalls!.at(-1)!.error = true;
+    run.progress.currentTool = undefined;
+    run.progress.currentToolArgs = undefined;
+    const changedToolResult = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(changedToolResult).not.toBe(changedProgress);
+    expect(changedToolResult.transcript).toContain("✗ write: two.ts");
+
+    run.state = "starting";
+    const changedState = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(changedState).not.toBe(changedToolResult);
+    expect(changedState.state).toBe("starting");
+  });
+
+  it("bounds sanitizer input before processing very large output", () => {
+    const replace = vi.spyOn(String.prototype, "replace");
+    const run: LiveSubagentTask = {
+      id: "large:0",
+      agent: "reviewer",
+      task: "review",
+      state: "running",
+      startedAt: 1,
+      progress: progress({ output: "x".repeat(MAX_BACKGROUND_TRANSCRIPT * 100) }),
+    };
+
+    let task: BackgroundTaskSnapshot["tasks"][number];
+    try {
+      task = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+      const largestScannedInput = Math.max(...replace.mock.instances.map((value) => String(value).length));
+      expect(largestScannedInput).toBeLessThanOrEqual(MAX_BACKGROUND_SANITIZE_SCAN);
+    } finally {
+      replace.mockRestore();
+    }
+    expect(task.transcript).toHaveLength(MAX_BACKGROUND_TRANSCRIPT);
+    expect(task.transcript).toContain("[transcript truncated]");
   });
 });
