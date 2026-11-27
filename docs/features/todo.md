@@ -1,7 +1,7 @@
 ---
 status: live
-last-verified: 2026-11-03
-verified-by: reading `packages/todo/src` (tool.ts, state-manager.ts, index.ts, prepare-args.ts, ui/todo-widget.ts) against pi 1.2.0's shipped `examples/extensions/todo.ts`, claim by claim, on 2026-10-14; the suite's own tests (`npx vitest run` — 2430 tests / 145 files) and `tsc --noEmit` clean in all 13 workspace projects. Not re-checked against a live terminal in this pass: the exact frame on which the widget disappears after auto-clear (see "Auto-clear" — the 2 s timer and the widget refresh are separate). On 2026-11-03 the schema-symbol sourcing below and `packages/todo/package.json`'s dependencies were re-read against pi 1.5.0 (both CI jobs green: the pinned-1.4.0 `typecheck` and the floating `pi-latest`); everything else above stands as recorded on 2026-10-14.
+last-verified: 2026-11-27
+verified-by: reading `packages/todo/src` and its tests on 2026-11-27; `npx tsc --noEmit` in `packages/todo`; focused state/widget tests (36 tests); and the full workspace suite (158 files, 2619 tests). The comparison with pi's shipped example was last checked claim by claim against pi 1.2.0 on 2026-10-14. Schema imports and package dependencies were re-checked against pi 1.5.0 on 2026-11-03.
 ---
 
 # Todo board (`@pi-archimedes/todo`)
@@ -40,9 +40,9 @@ Subagent columns are fed from the parent side: `packages/subagent/src/stream.ts`
 
 ## Auto-clear
 
-`TodoStateManager.write()` schedules a 2-second timer when the list is non-empty and every item is `completed`; when it fires, the list is empty (`packages/todo/src/state-manager.ts`). Any further write cancels it, and `session_shutdown` cancels it too.
+`TodoStateManager.write()` schedules a 2-second timer when the list is non-empty and every item is `completed`; when it fires, the list is empty (`packages/todo/src/state-manager.ts`). Any further write cancels it, and `session_shutdown` cancels it too. Restored session state goes through `write()`, so the latest restored completed list follows the same rule and reconstruction cancels any older timer.
 
-The timer empties the state; the widget goes away at the next widget refresh (`updateWidget` calls `setWidget(..., undefined)` once everything is empty), which happens on `turn_end` or on the next tool call. So the board does not vanish on a timer alone — it empties on the timer and is taken off screen on the following refresh.
+After emptying the state, the timer synchronously calls the widget refresh callback. `updateWidget` removes the board immediately when the main list and all subagent columns are empty. If a subagent column still has work, the same refresh keeps the board on screen with only that column. Callback failures are caught and written through `core/log` diagnostics, because a stale `ctx.ui` getter can throw and an uncaught timer error would terminate interactive mode.
 
 ## State across sessions
 
@@ -77,5 +77,4 @@ pi ships a todo example in its own `examples/extensions/`. It is the same *idea*
 
 ## Not verified in this pass
 
-- Whether the widget's own render loop can remove the board between `turn_end`s (i.e. whether the 2 s auto-clear is ever visible on its own). pi calls a widget factory once per `setWidget` call (`interactive-mode.js`, `setExtensionWidget` → `component = content(this.ui, theme)`), which is why the doc says "next refresh" rather than "immediately".
 - Live TUI captures of the multi-column board in this pass. Nothing in this package renders the widget to a screen: `packages/todo/src/ui/todo-widget.ts` has no test file, and the tests around it (`index.test.ts`, `host-bus.test.ts`) assert what reaches the column map over the event handle, not how it is drawn. So column widths, the header row and the divider are read from the source only.

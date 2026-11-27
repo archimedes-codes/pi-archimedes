@@ -16,6 +16,8 @@ export function registerTodo(pi: ExtensionAPI): void {
   let currentCtx: ExtensionContext | undefined;
   const state = new TodoStateManager(refreshWidget);
 
+  // This must be a hoisted function because state is constructed with the
+  // callback above. A const arrow here would be read in its temporal dead zone.
   function refreshWidget(): void {
     if (currentCtx) {
       updateWidget(state, currentCtx, subagentTodos);

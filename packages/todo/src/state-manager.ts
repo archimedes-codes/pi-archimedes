@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { describeError, diag } from "@pi-archimedes/core/log";
 import { normalizeTodoItems } from "./prepare-args.js";
 import type { TodoItem, TodoStats, ValidationResult } from "./types.js";
 
@@ -7,6 +8,12 @@ export class TodoStateManager {
   private todos: TodoItem[] = [];
   private autoClearTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /**
+   * `onAutoClear` runs only when the 2 s timer empties an all-completed list,
+   * never when `clear()` is called directly. It runs synchronously after the
+   * list is empty. Errors are caught and logged so they cannot escape the
+   * timer callback.
+   */
   constructor(private readonly onAutoClear?: () => void) {}
 
   read(): TodoItem[] {
@@ -19,8 +26,17 @@ export class TodoStateManager {
     // If all completed and non-empty, schedule auto-clear
     if (todos.length > 0 && todos.every((t) => t.status === "completed")) {
       this.scheduleAutoClear(() => {
-        this.todos = [];
-        this.onAutoClear?.();
+        // scheduleAutoClear has already nulled the timer, so clear() preserves
+        // timer semantics while keeping all state mutation on the public path.
+        this.clear();
+        try {
+          this.onAutoClear?.();
+        } catch (err) {
+          // This runs outside pi's guarded event bus. In particular, ctx.ui
+          // can throw once a runner is stale; a failed repaint must not turn
+          // the timer into an uncaught exception that exits interactive mode.
+          diag("todo", `auto-clear callback failed: ${describeError(err)}`);
+        }
       });
     }
   }

@@ -74,6 +74,17 @@ describe("TodoStateManager", () => {
       expect(onAutoClear).toHaveBeenCalledOnce();
     });
 
+    it("swallows callback errors after automatic clear", () => {
+      const notifyingManager = new TodoStateManager(() => {
+        throw new Error("stale UI");
+      });
+
+      notifyingManager.write([makeTodo("Done", "completed")]);
+
+      expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+      expect(notifyingManager.read()).toEqual([]);
+    });
+
     it("cancels an older auto-clear when a newer list is written", () => {
       const onAutoClear = vi.fn();
       const notifyingManager = new TodoStateManager(onAutoClear);

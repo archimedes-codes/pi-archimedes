@@ -211,6 +211,7 @@ describe("todo index — auto-clear widget refresh", () => {
 
     registerTodo(pi);
     return {
+      bus,
       ctx,
       handlers,
       get tool() {
@@ -244,6 +245,28 @@ describe("todo index — auto-clear widget refresh", () => {
     vi.advanceTimersByTime(2000);
 
     expect(fixture.widgetValues.at(-1)).toBeUndefined();
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+  });
+
+  it("keeps subagent columns when the main list auto-clears", async () => {
+    const fixture = setup();
+    await fixture.handlers.session_start?.(undefined, fixture.ctx);
+    fixture.bus.emit(Events.TODOS_UPDATE, {
+      source: "subagent:scout:11111111",
+      todos: [{ content: "Child task", status: "pending" }],
+    });
+    await fixture.tool.execute(
+      "complete",
+      { operation: "write", todoList: [{ content: "Done", status: "completed" }] },
+      undefined,
+      undefined,
+      fixture.ctx,
+    );
+
+    vi.advanceTimersByTime(2000);
+
+    // The main column is gone; the widget stays for the child column.
+    expect(typeof fixture.widgetValues.at(-1)).toBe("function");
     fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
   });
 
@@ -295,7 +318,7 @@ describe("todo index — auto-clear widget refresh", () => {
     fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
   });
 
-  it("cancels a pending auto-clear on shutdown", async () => {
+  it("prevents the auto-clear callback from repainting after shutdown", async () => {
     const fixture = setup();
     await fixture.handlers.session_start?.(undefined, fixture.ctx);
     await fixture.tool.execute(
@@ -310,7 +333,7 @@ describe("todo index — auto-clear widget refresh", () => {
     const callsAfterShutdown = fixture.widgetValues.length;
     vi.advanceTimersByTime(2000);
 
+    // A surviving timer would call onAutoClear -> refreshWidget -> setWidget.
     expect(fixture.widgetValues).toHaveLength(callsAfterShutdown);
-    expect(fixture.widgetValues.at(-1)).toBeUndefined();
   });
 });
