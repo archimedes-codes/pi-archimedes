@@ -7,7 +7,7 @@
  * is always canonical — the widget can render real text and can never
  * print the string "undefined".
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Events } from "@pi-archimedes/core/events";
 import { registerTodo } from "./index.js";
@@ -180,5 +180,160 @@ describe("todo index — bus consumer normalization", () => {
     // clears state (fixture uses a pending item, so no auto-clear timer
     // is pending, but cancel defensively).
     handlers.session_shutdown?.(undefined, ctx as any);
+  });
+});
+
+describe("todo index — auto-clear widget refresh", () => {
+  function setup(branch: unknown[] = []) {
+    const handlers: Record<string, Function> = {};
+    const widgetValues: unknown[] = [];
+    let tool: any;
+    const bus = fakeBus();
+    const pi = {
+      on(event: string, handler: Function) {
+        handlers[event] = handler;
+      },
+      registerTool(registeredTool: any) {
+        tool = registeredTool;
+      },
+      registerCommand() {},
+      events: bus,
+    } as unknown as ExtensionAPI;
+    const ctx = {
+      ui: {
+        setWidget(id: string, value: unknown) {
+          if (id === "todo-list") widgetValues.push(value);
+        },
+        notify() {},
+      },
+      sessionManager: { getBranch: () => branch },
+    } as any;
+
+    registerTodo(pi);
+    return {
+      bus,
+      ctx,
+      handlers,
+      get tool() {
+        return tool;
+      },
+      widgetValues,
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("removes the widget when a completed write auto-clears", async () => {
+    const fixture = setup();
+    await fixture.handlers.session_start?.(undefined, fixture.ctx);
+
+    await fixture.tool.execute(
+      "complete",
+      { operation: "write", todoList: [{ content: "Done", status: "completed" }] },
+      undefined,
+      undefined,
+      fixture.ctx,
+    );
+    expect(typeof fixture.widgetValues.at(-1)).toBe("function");
+
+    vi.advanceTimersByTime(2000);
+
+    expect(fixture.widgetValues.at(-1)).toBeUndefined();
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+  });
+
+  it("keeps subagent columns when the main list auto-clears", async () => {
+    const fixture = setup();
+    await fixture.handlers.session_start?.(undefined, fixture.ctx);
+    fixture.bus.emit(Events.TODOS_UPDATE, {
+      source: "subagent:scout:11111111",
+      todos: [{ content: "Child task", status: "pending" }],
+    });
+    await fixture.tool.execute(
+      "complete",
+      { operation: "write", todoList: [{ content: "Done", status: "completed" }] },
+      undefined,
+      undefined,
+      fixture.ctx,
+    );
+
+    vi.advanceTimersByTime(2000);
+
+    // The main column is gone; the widget stays for the child column.
+    expect(typeof fixture.widgetValues.at(-1)).toBe("function");
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+  });
+
+  it("reconstructs a completed latest list, then clears and repaints", async () => {
+    const fixture = setup([
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "manage_todo_list",
+          details: { todos: [{ content: "Earlier", status: "pending" }] },
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "manage_todo_list",
+          details: { todos: [{ content: "Restored done", status: "completed" }] },
+        },
+      },
+    ]);
+
+    await fixture.handlers.session_tree?.(undefined, fixture.ctx);
+    expect(typeof fixture.widgetValues.at(-1)).toBe("function");
+
+    vi.advanceTimersByTime(2000);
+
+    expect(fixture.widgetValues.at(-1)).toBeUndefined();
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+  });
+
+  it("keeps a restored pending list visible", async () => {
+    const fixture = setup([
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "manage_todo_list",
+          details: { todos: [{ content: "Restored open", status: "pending" }] },
+        },
+      },
+    ]);
+
+    await fixture.handlers.session_start?.(undefined, fixture.ctx);
+    vi.advanceTimersByTime(2000);
+
+    expect(typeof fixture.widgetValues.at(-1)).toBe("function");
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+  });
+
+  it("prevents the auto-clear callback from repainting after shutdown", async () => {
+    const fixture = setup();
+    await fixture.handlers.session_start?.(undefined, fixture.ctx);
+    await fixture.tool.execute(
+      "complete",
+      { operation: "write", todoList: [{ content: "Done", status: "completed" }] },
+      undefined,
+      undefined,
+      fixture.ctx,
+    );
+
+    fixture.handlers.session_shutdown?.(undefined, fixture.ctx);
+    const callsAfterShutdown = fixture.widgetValues.length;
+    vi.advanceTimersByTime(2000);
+
+    // A surviving timer would call onAutoClear -> refreshWidget -> setWidget.
+    expect(fixture.widgetValues).toHaveLength(callsAfterShutdown);
   });
 });
