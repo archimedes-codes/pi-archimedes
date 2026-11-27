@@ -30,12 +30,14 @@ vi.mock("@pi-archimedes/core/settings-io", () => ({
 	},
 }));
 
-// prompt mock: the test drives WHAT the user types via `typedPassword`.
-const promptState = vi.hoisted(() => ({ typedPassword: "" as string, prompted: 0 }));
+// prompt mock: the test drives WHAT the user types via `typedPassword`, and
+// `reject` models the non-TUI session where the masked prompt does not exist.
+const promptState = vi.hoisted(() => ({ typedPassword: "" as string, prompted: 0, reject: false }));
 vi.mock("./prompt.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("./prompt.js")>()),
 	promptForPassword: vi.fn(async () => {
 		promptState.prompted += 1;
+		if (promptState.reject) throw new Error("the masked prompt needs a TUI session");
 		return promptState.typedPassword;
 	}),
 }));
@@ -92,6 +94,7 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		settingsStore.saved.length = 0;
 		promptState.typedPassword = "";
 		promptState.prompted = 0;
+		promptState.reject = false;
 		toolState.probeResult = true;
 		vi.mocked(probeSudoPasswordStrict).mockClear();
 		const fake = fakePi();
@@ -113,8 +116,10 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		expect(probeSudoPasswordStrict).toHaveBeenCalledTimes(1);
 		const entry = credentialCache.get();
 		expect(entry?.password).toBe("hunter2");
-		expect(notified[0]).toContain("verified and cached");
-		expect(notified[0]).toContain("15m from now"); // default TTL
+		expect(notified[0]).toContain("cached — 15m from now"); // default TTL
+		// `verified` is a claim sudo did not make on a NOPASSWD host, where
+		// `sudo -k -S -v` exits 0 without ever reading a password.
+		expect(notified[0]).not.toContain("verified");
 	});
 
 	it("auth with a duration argument caches with that one-off TTL and does NOT touch the config default", async () => {
@@ -194,11 +199,16 @@ describe("/sudo subcommands (ADR 0034)", () => {
 
 	it("ttl with an unparseable argument is a usage error — nothing saved, cache untouched", async () => {
 		credentialCache.set("hunter2", 60_000);
+		// Read the deadline BEFORE the await: the handler awaits, so a millisecond may
+		// tick between set() and a Date.now() read here, and an exact post-await
+		// comparison then fails at random (2 of 10 runs). The claim under test is
+		// "not re-timed", and re-timing moves this by orders of magnitude.
+		const expiresAt = credentialCache.get()?.expiresAt;
 		const { ctx, notified } = fakeCtx();
 		await def.handler("ttl banana", ctx);
 
 		expect(settingsStore.saved).toHaveLength(0);
-		expect(credentialCache.get()?.expiresAt).toBe(Date.now() + 60_000);
+		expect(credentialCache.get()?.expiresAt).toBe(expiresAt);
 		expect(notified[0]).toContain("Not a duration");
 	});
 
@@ -249,5 +259,74 @@ describe("/sudo subcommands (ADR 0034)", () => {
 
 	it("completions stop at the second level (deep args belong to the handler)", () => {
 		expect(def.getArgumentCompletions?.("auth 2h")).toBeNull();
+	});
+
+	// ── the password's path: prompt → probe → cache, and nowhere else ─────────
+
+	it("never puts the typed password into a notify message or a saved setting", async () => {
+		// The package's central promise (README: "never in argv, environment
+		// variables, command logs, or the LLM context") is pinned for argv and stdin;
+		// notify is the channel that reaches a transcript in bridge/RPC mode.
+		promptState.typedPassword = "hunter2";
+		for (const probeResult of [true, false]) {
+			toolState.probeResult = probeResult;
+			const { ctx, notified } = fakeCtx();
+			await def.handler("auth 2h", ctx);
+			expect(notified.join("\n")).not.toContain("hunter2");
+		}
+		expect(JSON.stringify(settingsStore.settings)).not.toContain("hunter2");
+	});
+
+	it("passes the typed password and the probe timeout to the strict probe", async () => {
+		promptState.typedPassword = "hunter2";
+		const { ctx } = fakeCtx();
+		await def.handler("auth", ctx);
+		expect(probeSudoPasswordStrict).toHaveBeenCalledWith("hunter2", 5_000, undefined, expect.anything());
+	});
+
+	it("the spawner registered through registerSudo is the one the strict probe gets", async () => {
+		const fake = fakePi();
+		const spawner = vi.fn();
+		registerSudo(fake.pi, { spawner: spawner as never });
+		promptState.typedPassword = "hunter2";
+		const { ctx } = fakeCtx();
+		await fake.commands.get("sudo")!.handler("auth", ctx);
+		expect(probeSudoPasswordStrict).toHaveBeenLastCalledWith("hunter2", 5_000, undefined, spawner);
+	});
+
+	it("auth in a session without a masked prompt notifies instead of throwing", async () => {
+		// promptForPassword rejects outside TUI/bridge; uncaught, pi reports it as an
+		// extension error on `command:sudo` quoting sudo_exec — the wrong command.
+		promptState.reject = true;
+		const { ctx, notified } = fakeCtx();
+		await expect(def.handler("auth", ctx)).resolves.toBeUndefined();
+
+		expect(credentialCache.get()).toBeNull();
+		expect(notified[0]).toContain("needs an interactive session");
+		expect(notified.join("\n")).not.toContain("sudo_exec");
+	});
+
+	// ── ttl never re-opens a closed window ───────────────────────────────────
+
+	it("ttl <duration> does NOT revive an expired entry — expiry is final until /sudo auth", async () => {
+		// Reviving would reopen the ADR 0033 gate without re-validating anything.
+		credentialCache.set("hunter2", 1);
+		await new Promise((r) => setTimeout(r, 5));
+		const { ctx, notified } = fakeCtx();
+		await def.handler("ttl 8h", ctx);
+
+		expect(settingsStore.saved).toHaveLength(1); // the default still persists
+		expect(credentialCache.get()).toBeNull(); // the window does not reopen
+		expect(notified[0]).toBe("Default TTL set to 8h."); // and no false "re-timed" claim
+	});
+
+	it("ttl default does not revive an expired entry either", async () => {
+		credentialCache.set("hunter2", 1);
+		await new Promise((r) => setTimeout(r, 5));
+		const { ctx, notified } = fakeCtx();
+		await def.handler("ttl default", ctx);
+
+		expect(credentialCache.get()).toBeNull();
+		expect(notified[0]).toBe("TTL reset to the default 15m.");
 	});
 });

@@ -43,15 +43,17 @@ export class CredentialCache {
 	}
 
 	/**
-	 * Re-time an EXISTING cached entry to a new TTL (from now). The password is
-	 * NOT touched and never leaves the cache — this is how `/sudo ttl <d>`
-	 * extends or shortens a live credential without re-prompting. Returns false
-	 * (a no-op) when nothing is cached at all; an expired-but-present entry is
-	 * still re-timed — the password is the user's own cached secret and
-	 * `/sudo ttl` is an explicit human act on it.
+	 * Re-time a LIVE cached entry to a new TTL (from now). The password is NOT
+	 * touched and never leaves the cache — this is how `/sudo ttl <d>` extends
+	 * or shortens a live credential without re-prompting. Returns false (a no-op)
+	 * when nothing is cached or the entry has expired: expiry is what `get()`
+	 * reports as absent and what re-arms the ADR 0033 confirmation gate, so
+	 * reviving it here would reopen a window nobody re-authorized. An expired
+	 * credential comes back through `/sudo auth`, which re-validates it.
 	 */
 	rettl(ttlMs: number): boolean {
 		if (this.entry === null) return false;
+		if (Date.now() >= this.entry.expiresAt) return false;
 		this.entry.expiresAt = Date.now() + ttlMs;
 		return true;
 	}

@@ -58,4 +58,14 @@ describe("formatDuration", () => {
 			expect(parseDuration(formatDuration(ms))).toBe(ms);
 		}
 	});
+
+	it("drops the millisecond residue once the duration is a second or more", () => {
+		// A live countdown is `expiresAt - Date.now()`, so a residue would make the
+		// state line read "14m59s123ms remaining" and jitter on every call.
+		expect(formatDuration(899_999)).toBe("14m59s");
+		expect(formatDuration(900_000)).toBe("15m");
+		expect(formatDuration(999)).toBe("999ms"); // sub-second keeps its resolution
+		expect(formatDuration(1_000)).toBe("1s");
+		expect(formatDuration(1_500)).toBe("1s");
+	});
 });

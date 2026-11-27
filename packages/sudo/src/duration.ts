@@ -47,11 +47,15 @@ function bounded(ms: number): number | null {
 	return ms;
 }
 
-/** Human-readable short form for notify lines: `15m`, `2h30m`, `1d`. */
+/** Human-readable short form for notify lines: `15m`, `2h30m`, `1d`, `500ms`. */
 export function formatDuration(ms: number): string {
 	if (ms <= 0) return "0ms";
 	const parts: string[] = [];
-	let rest = ms;
+	// Sub-second resolution only for a sub-second duration. A live countdown is
+	// recomputed from `expiresAt - Date.now()`, so keeping the millisecond residue
+	// makes the state line read "14m59s123ms remaining" and change on every call;
+	// a 15m TTL would print cleanly only in the instant it is set.
+	let rest = ms < 1_000 ? ms : Math.floor(ms / 1_000) * 1_000;
 	for (const [unit, size] of [["d", 86_400_000], ["h", 3_600_000], ["m", 60_000], ["s", 1_000]] as const) {
 		if (rest >= size) {
 			const n = Math.floor(rest / size);

@@ -392,12 +392,17 @@ export async function probeSudoPassword(
  * open (ADR 0034).
  *
  * `-k` discards the timestamp first, so sudo must read the password from stdin
- * and genuinely check it. Accepted side effect: a FAILED check leaves the
- * user's previous ticket discarded. That is the price of a real answer, and it
- * costs nothing that matters — the next `sudo -S` command supplies a password
- * from the credential cache anyway, so a fresh ticket is re-established on
- * first use. A NOPASSWD policy still exits 0 without a password, which is
- * correct: sudo says this user needs none.
+ * and genuinely check it. Two accepted side effects. (1) A FAILED check leaves
+ * the user's previous ticket discarded. (2) A SUCCESSFUL check discards it too,
+ * replacing it with a fresh ticket bounded by sudoers' `timestamp_timeout` — so
+ * a host configured for a longer window sees its OS ticket SHORTENED, and a
+ * tty-keyed timestamp with no controlling terminal ends up unreplayable. Both
+ * cost little here: the next `sudo -S` command supplies a password from the
+ * credential cache anyway, so a fresh ticket is re-established on first use.
+ * That is what a real answer to "is this password correct" costs, and it is why
+ * ADR 0032 deliberately omits `-k` from the diagnostic path. A NOPASSWD policy
+ * still exits 0 without reading stdin — which is right for sudo, but it makes
+ * the caller's "verified" claim vacuous on such a host; see index.ts.
  */
 export async function probeSudoPasswordStrict(
 	password: string,

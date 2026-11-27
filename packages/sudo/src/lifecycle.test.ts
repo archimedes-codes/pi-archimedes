@@ -172,7 +172,10 @@ describe("registerSudo — session lifecycle + /sudo command", () => {
 		const cached = fakeCtx();
 		await def.handler("", cached.ctx);
 		expect(cached.notified[0]).toContain("Sudo credential cached —");
-		expect(cached.notified[0]).toContain("15m remaining");
+		expect(cached.notified).toHaveLength(1);
+		// The countdown is `expiresAt - Date.now()`, so a millisecond may have ticked
+		// since set(900_000): pin the shape, not one exact rendering.
+		expect(cached.notified[0]).toMatch(/^Sudo credential cached — (15m|14m59s) remaining\. Default TTL: 15m\.$/);
 		expect(credentialCache.get()).not.toBeNull();
 
 		// Expired entry reads as not-cached (get() is expiry-aware).

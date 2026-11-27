@@ -6,12 +6,10 @@ import { DEFAULT_SUDO_CONFIG, loadSudoConfig, saveSudoConfig, type SudoConfig } 
 import { formatDuration, parseDuration } from "./duration.js";
 import { handleBashToolCall, isInteractiveSudoAttempt, type GuardResult } from "./guard.js";
 import { confirmCommand, maskLine, promptForPassword } from "./prompt.js";
-import { buildSudoArgv, createSudoExecTool, defaultSpawner, probeSudoPasswordStrict, registerSudoTool, scrubSecret, type SudoSpawner } from "./tool.js";
+import { buildSudoArgv, createSudoExecTool, defaultSpawner, probeSudoPasswordStrict, registerSudoTool, AUTH_PROBE_TIMEOUT_MS, scrubSecret, type SudoSpawner } from "./tool.js";
 
 /** Presets offered by the second-level completions and the interactive TTL picker. */
 const TTL_PRESETS = ["15m", "30m", "1h", "4h", "8h"] as const;
-/** Validation timeout for the pre-authorization probe — a wrong password fails in well under this. */
-const AUTH_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Registers `sudo_exec` (Task 1), the bash-sudo guard (Task 2) — a
@@ -22,6 +20,10 @@ const AUTH_PROBE_TIMEOUT_MS = 5_000;
  * `/reload`).
  */
 export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner }): void {
+	// One spawner for the whole registration: the tool seam is the same seam the
+	// `/sudo auth` probe goes through, so tests (and any embedder) inject one
+	// fake and it reaches every privileged call this extension makes.
+	const spawner = options?.spawner ?? defaultSpawner;
 	registerSudoTool(pi, options);
 	// Active veto: the guard is pure (isInteractiveSudoAttempt) and exported for
 	// direct testing; handleBashToolCall only vets — it never mutates event.input.
@@ -75,7 +77,7 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 		}
 		const ttlMs = parseDuration(arg);
 		if (ttlMs === null) {
-			ctx.ui.notify(`Not a duration: "${arg}". Use e.g. 15m, 2h30m, 1d, or "default" to reset.`, "error");
+			ctx.ui.notify(`Not a duration: "${arg}". Use e.g. 15m, 2h30m, 1d, or "default" to reset. A bare number means milliseconds.`, "error");
 			return;
 		}
 		saveSudoConfig({ ...loadSudoConfig(), ttlMs });
@@ -99,23 +101,40 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 		if (arg !== "") {
 			const parsed = parseDuration(arg);
 			if (parsed === null) {
-				ctx.ui.notify(`Not a duration: "${arg}". Use e.g. /sudo auth 2h30m, or /sudo auth for the default TTL.`, "error");
+				ctx.ui.notify(`Not a duration: "${arg}". Use e.g. /sudo auth 2h30m, or /sudo auth for the default TTL. A bare number means milliseconds.`, "error");
 				return;
 			}
 			ttlMs = parsed;
 		}
-		const password = await promptForPassword(ctx, "", "pre-authorization — the password is validated and cached; it never enters the conversation");
+		// promptForPassword REJECTS outside a TUI (and outside bridge mode). Left
+		// uncaught this escapes the handler and pi reports it as an extension error
+		// on `command:sudo` quoting sudo_exec — the wrong command, on a channel the
+		// user reading `/sudo auth` cannot act on. Turn it into a notify instead.
+		const password = await promptForPassword(
+			ctx,
+			"",
+			"pre-authorization — the password is validated and cached; it never enters the conversation",
+		).catch(() => {
+			ctx.ui.notify("/sudo auth needs an interactive session — there is no masked password prompt here, so nothing was validated or cached.", "error");
+			return "";
+		});
 		if (!password) {
 			ctx.ui.notify("Cancelled — nothing was validated or cached.", "info");
 			return;
 		}
-		const ok = await probeSudoPasswordStrict(password, AUTH_PROBE_TIMEOUT_MS, undefined, defaultSpawner);
+		const ok = await probeSudoPasswordStrict(password, AUTH_PROBE_TIMEOUT_MS, undefined, spawner);
 		if (!ok) {
 			ctx.ui.notify("Sudo rejected that password — nothing was cached.", "error");
 			return;
 		}
 		credentialCache.set(password, ttlMs);
-		ctx.ui.notify(`Sudo credential verified and cached — ${formatDuration(ttlMs)} from now. /sudo forget expires it immediately.`, "info");
+		// "verified" is only true when sudo read the password. Under a NOPASSWD
+		// policy `sudo -k -S -v` exits 0 without reading stdin, so a typo reaches
+		// this line — say what was established instead of what was assumed.
+		ctx.ui.notify(
+			`Sudo credential cached — ${formatDuration(ttlMs)} from now. sudo accepted it (a NOPASSWD policy accepts without reading a password, so on such a host this says nothing about the typed value). /sudo forget expires it immediately.`,
+			"info",
+		);
 	};
 
 	// /sudo — credential cache management. Bare: state. Subcommands: auth
