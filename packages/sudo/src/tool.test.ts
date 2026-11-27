@@ -32,7 +32,7 @@ vi.mock("@pi-archimedes/core/bridge", () => ({
 	getBridge: () => bridgeState,
 }));
 
-import { buildSudoArgv, CONFIRMATION_SKIPPED_MARKER, createSudoExecTool, probeSudoPassword, probeSudoTicket, scrubSecret } from "./tool.js";
+import { buildSudoArgv, CONFIRMATION_SKIPPED_MARKER, createSudoExecTool, probeSudoPassword, probeSudoPasswordStrict, probeSudoTicket, scrubSecret } from "./tool.js";
 import type { SudoChild, SudoSpawner } from "./tool.js";
 import { credentialCache } from "./cache.js";
 
@@ -1124,6 +1124,43 @@ describe("sudo_exec tool", () => {
 			const valid = await probeSudoTicket(5000, undefined, capturing);
 
 			expect(calls[0]).toEqual({ command: "sudo", args: ["-n", "-v"] });
+			expect(valid).toBe(false);
+		});
+	});
+
+	describe("probeSudoPasswordStrict (what /sudo auth validates with)", () => {
+		it("passes -k so sudo must READ the password instead of accepting a live ticket", async () => {
+			const calls: Array<{ command: string; args: string[] }> = [];
+			const { spawner, last } = makeFakeSpawner({ stderr: "", code: 0 });
+			const capturing: SudoSpawner = (command, args) => {
+				calls.push({ command, args });
+				return spawner(command, args);
+			};
+
+			const valid = await probeSudoPasswordStrict("hunter2", 5000, undefined, capturing);
+
+			expect(calls).toHaveLength(1);
+			// The -k is the whole difference from probeSudoPassword: without it,
+			// `sudo -v` with a valid ticket exits 0 without reading stdin and a
+			// TYPO would be reported as verified (ADR 0034).
+			expect(calls[0]).toEqual({ command: "sudo", args: ["-k", "-S", "-v", "-p", ""] });
+			expect(calls[0]!.args).not.toContain("hunter2"); // password never in argv
+			expect(last.child.stdin.written).toEqual(["hunter2\n"]); // …only on stdin
+			expect(valid).toBe(true);
+		});
+
+		it("returns false when sudo rejects the typed password", async () => {
+			const { spawner, last } = makeFakeSpawner({ stderr: "sudo: 1 incorrect password attempt\n", code: 1 });
+			const valid = await probeSudoPasswordStrict("wrong", 5000, undefined, spawner);
+			expect(last.child.stdin.written).toEqual(["wrong\n"]);
+			expect(valid).toBe(false);
+		});
+
+		it("returns false on timeout instead of reporting a credential it never checked", async () => {
+			// exitOn: "kill" — the child only dies when the timeout kills it, which
+			// is exactly the hang a real unresponsive sudo would produce.
+			const { spawner } = makeFakeSpawner({ stderr: "", code: null, exitOn: "kill" });
+			const valid = await probeSudoPasswordStrict("hunter2", 20, undefined, spawner);
 			expect(valid).toBe(false);
 		});
 	});

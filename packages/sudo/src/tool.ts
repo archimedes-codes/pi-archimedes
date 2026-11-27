@@ -73,7 +73,8 @@ export interface SudoChild {
 
 export type SudoSpawner = (command: string, args: string[], options?: { detached: boolean }) => SudoChild;
 
-const defaultSpawner: SudoSpawner = (command, args, options) => spawn(command, args, options);
+/** The real process spawner; injectable in tests, used directly by /sudo auth. */
+export const defaultSpawner: SudoSpawner = (command, args, options) => spawn(command, args, options);
 
 /** Short delay before the ONE retry of a transient group-kill failure. */
 const GROUP_KILL_RETRY_DELAY_MS = 50;
@@ -374,6 +375,42 @@ export async function probeSudoPassword(
 	spawner: SudoSpawner,
 ): Promise<boolean> {
 	const run = await runSudo(["sudo", "-S", "-v", "-p", ""], password, timeoutMs, signal, spawner);
+	return !run.timedOut && run.error === undefined && run.exitCode === 0;
+}
+
+/**
+ * Validate a password the user just typed, for `/sudo auth` pre-authorization.
+ *
+ * This is `probeSudoPassword` with `-k`, and the difference is the whole point:
+ * `sudo -v` with a still-valid TICKET refreshes it and exits 0 **without ever
+ * reading stdin**, so the non-invalidating probe above answers "is this user
+ * currently privileged", not "is this password correct". For the diagnostic
+ * path that distinction is exactly right (it must not revoke a working
+ * ticket). For pre-authorization it would cache a typo and report it as
+ * verified — the failure only surfaces later, when the ticket expires and
+ * every privileged command starts failing inside a window the user believes is
+ * open (ADR 0034).
+ *
+ * `-k` discards the timestamp first, so sudo must read the password from stdin
+ * and genuinely check it. Two accepted side effects. (1) A FAILED check leaves
+ * the user's previous ticket discarded. (2) A SUCCESSFUL check discards it too,
+ * replacing it with a fresh ticket bounded by sudoers' `timestamp_timeout` — so
+ * a host configured for a longer window sees its OS ticket SHORTENED, and a
+ * tty-keyed timestamp with no controlling terminal ends up unreplayable. Both
+ * cost little here: the next `sudo -S` command supplies a password from the
+ * credential cache anyway, so a fresh ticket is re-established on first use.
+ * That is what a real answer to "is this password correct" costs, and it is why
+ * ADR 0032 deliberately omits `-k` from the diagnostic path. A NOPASSWD policy
+ * still exits 0 without reading stdin — which is right for sudo, but it makes
+ * the caller's "verified" claim vacuous on such a host; see index.ts.
+ */
+export async function probeSudoPasswordStrict(
+	password: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	spawner: SudoSpawner,
+): Promise<boolean> {
+	const run = await runSudo(["sudo", "-k", "-S", "-v", "-p", ""], password, timeoutMs, signal, spawner);
 	return !run.timedOut && run.error === undefined && run.exitCode === 0;
 }
 
