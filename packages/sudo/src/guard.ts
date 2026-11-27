@@ -559,7 +559,16 @@ export function tokenizeCommand(command: string): GuardToken[][] {
 					heredoc.line = "";
 				}
 			} else if (c === "\t" && heredoc.stripTabs) {
-				if (heredoc.line === "") continue; // leading tabs are stripped, not body content
+				// Leading tabs are stripped, not body content. The loop advances `i`
+				// once at the bottom, so this `continue` must step over the tab
+				// itself — otherwise the same character is re-read forever and a
+				// `<<-EOF` body indented with tabs hangs the tokenizer (and with it
+				// the session: the guard runs on the JS main thread, where no signal
+				// can interrupt it).
+				if (heredoc.line === "") {
+					i += 1;
+					continue;
+				}
 				heredoc.line += c;
 				current += c;
 				haveWord = true;

@@ -1,7 +1,7 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
-import { handleBashToolCall, isInteractiveSudoAttempt } from "./guard.js";
+import { handleBashToolCall, isInteractiveSudoAttempt, tokenizeCommand } from "./guard.js";
 
 // ── plan-030 Task 2: the 12 enumerated detection cases ─────────────────────
 
@@ -423,5 +423,32 @@ describe("isInteractiveSudoAttempt — header known-gaps, documented behavior pi
 		expect(isInteractiveSudoAttempt("exec -a sudo apt").blocked).toBe(false); // argv0 swap; runs `apt`
 		expect(isInteractiveSudoAttempt("xargs -e sudo cat").blocked).toBe(false); // the stopword IS `sudo`; runs `cat`
 		expect(isInteractiveSudoAttempt("env '\"sudo\" -n' true").blocked).toBe(false); // allow-direction of the quoted-cluster no-prompt lookahead (guard.ts ~411): `env '"sudo" apt'` is pinned blocked, this pins the allow side
+	});
+});
+
+// ── `<<-EOF` bodies indented with tabs used to spin forever ────────────────
+// The heredoc reader stripped leading tabs with a bare `continue`, skipping the
+// loop's only `i += 1` → the same tab was re-read endlessly. Because the guard
+// runs synchronously on the JS main thread, the hang took the whole pi session
+// with it: 100% CPU, no syscalls, and SIGINT/SIGTERM could not be serviced.
+describe("isInteractiveSudoAttempt — `<<-` heredoc bodies indented with tabs", () => {
+	it("terminates on a tab-indented `<<-EOF` body (hang regression)", () => {
+		const cmd = `cd /tmp && bash -c 'while IFS=$'\t' read -r a b; do printf "%s=%s\\n" "$a" "$b"; done <<-EOF\n\tA=1\tlabel\n\tB=2\tlabel\nEOF'`;
+		expect(isInteractiveSudoAttempt(cmd).blocked).toBe(false);
+	});
+
+	it("still blocks a `sudo` carried in a tab-indented `<<-EOF` body", () => {
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tsudo apt update\n\tEOF").blocked).toBe(true);
+	});
+
+	it("does not block a tab-indented body without sudo", () => {
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tplain body\n\tEOF").blocked).toBe(false);
+	});
+
+	it("tokenizeCommand: leading tabs are stripped from the body, delimiter still closes", () => {
+		const segs = tokenizeCommand("cat <<-EOF\n\t\tFOO\n\tEOF\nbar");
+		const words = segs.flat().map((t) => t.text);
+		expect(words).toContain("FOO"); // indent stripped, body word intact
+		expect(words).toContain("bar"); // the heredoc closes, following text is parsed again
 	});
 });
