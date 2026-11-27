@@ -51,6 +51,25 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 	};
 
 	/**
+	 * Report a TTL change honestly. `rettl` only re-times a LIVE entry, so three
+	 * outcomes exist and two of them used to print the same sentence: a live entry
+	 * re-timed, an expired entry left shut, and an empty cache. The middle one is
+	 * the one that matters — a user who types `/sudo ttl 8h` hoping to reopen a
+	 * lapsed window must not read the empty-cache message.
+	 */
+	const notifyTtlApplied = (ctx: ExtensionCommandContext, label: string, retimed: boolean): void => {
+		if (retimed) {
+			ctx.ui.notify(`${label}; the cached credential was re-timed to match.`, "info");
+			return;
+		}
+		if (credentialCache.isExpired) {
+			ctx.ui.notify(`${label}. The cached credential had expired, so it is not active — \`/sudo auth\` re-opens it.`, "warning");
+			return;
+		}
+		ctx.ui.notify(`${label}.`, "info");
+	};
+
+	/**
 	 * `/sudo ttl [duration|default]` — show, set (persistently), or reset the
 	 * default TTL, and re-time a live cached entry to match. A bare `/sudo ttl`
 	 * opens the interactive picker; a duration argument sets directly.
@@ -68,11 +87,7 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 		if (arg === "default") {
 			const config = loadSudoConfig();
 			saveSudoConfig({ ...config, ttlMs: DEFAULT_SUDO_CONFIG.ttlMs });
-			if (credentialCache.rettl(DEFAULT_SUDO_CONFIG.ttlMs)) {
-				ctx.ui.notify(`TTL reset to the default ${formatDuration(DEFAULT_SUDO_CONFIG.ttlMs)}; the cached credential was re-timed to match.`, "info");
-			} else {
-				ctx.ui.notify(`TTL reset to the default ${formatDuration(DEFAULT_SUDO_CONFIG.ttlMs)}.`, "info");
-			}
+			notifyTtlApplied(ctx, `TTL reset to the default ${formatDuration(DEFAULT_SUDO_CONFIG.ttlMs)}`, credentialCache.rettl(DEFAULT_SUDO_CONFIG.ttlMs));
 			return;
 		}
 		const ttlMs = parseDuration(arg);
@@ -81,11 +96,7 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 			return;
 		}
 		saveSudoConfig({ ...loadSudoConfig(), ttlMs });
-		if (credentialCache.rettl(ttlMs)) {
-			ctx.ui.notify(`Default TTL set to ${formatDuration(ttlMs)}; the cached credential was re-timed to match.`, "info");
-		} else {
-			ctx.ui.notify(`Default TTL set to ${formatDuration(ttlMs)}.`, "info");
-		}
+		notifyTtlApplied(ctx, `Default TTL set to ${formatDuration(ttlMs)}`, credentialCache.rettl(ttlMs));
 	};
 
 	/**
@@ -110,14 +121,18 @@ export function registerSudo(pi: ExtensionAPI, options?: { spawner?: SudoSpawner
 		// uncaught this escapes the handler and pi reports it as an extension error
 		// on `command:sudo` quoting sudo_exec — the wrong command, on a channel the
 		// user reading `/sudo auth` cannot act on. Turn it into a notify instead.
+		// `null`, not `""`: `""` is promptForPassword's CANCELLATION sentinel, so
+		// returning it would fall into the branch below and tell the user they
+		// cancelled something they were never asked about.
 		const password = await promptForPassword(
 			ctx,
 			"",
 			"pre-authorization — the password is validated and cached; it never enters the conversation",
 		).catch(() => {
 			ctx.ui.notify("/sudo auth needs an interactive session — there is no masked password prompt here, so nothing was validated or cached.", "error");
-			return "";
+			return null;
 		});
+		if (password === null) return;
 		if (!password) {
 			ctx.ui.notify("Cancelled — nothing was validated or cached.", "info");
 			return;

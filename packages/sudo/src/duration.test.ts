@@ -60,12 +60,20 @@ describe("formatDuration", () => {
 	});
 
 	it("drops the millisecond residue once the duration is a second or more", () => {
-		// A live countdown is `expiresAt - Date.now()`, so a residue would make the
-		// state line read "14m59s123ms remaining" and jitter on every call.
+		// `1_500` is the discriminator: without the floor, `parts` gets `1s` and the
+		// residue adds `500ms` → `1s500ms`. `999` is a sanity pin only — the
+		// `parts.push` fallback renders `999ms` with or without the sub-second guard.
+		expect(formatDuration(1_500)).toBe("1s");
 		expect(formatDuration(899_999)).toBe("14m59s");
 		expect(formatDuration(900_000)).toBe("15m");
-		expect(formatDuration(999)).toBe("999ms"); // sub-second keeps its resolution
 		expect(formatDuration(1_000)).toBe("1s");
-		expect(formatDuration(1_500)).toBe("1s");
+		expect(formatDuration(999)).toBe("999ms"); // sub-second resolution kept
+	});
+
+	it("renders a non-positive duration as 0ms rather than an empty string", () => {
+		// Reachable from `index.ts`, which feeds the completion descriptions
+		// `parseDuration(value) ?? 0`, so the floor is load-bearing.
+		expect(formatDuration(0)).toBe("0ms");
+		expect(formatDuration(-1)).toBe("0ms");
 	});
 });

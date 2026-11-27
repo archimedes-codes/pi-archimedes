@@ -74,16 +74,18 @@ function fakePi(): FakePi {
 
 function fakeCtx(overrides?: { select?: (title: string, options: string[]) => Promise<string | undefined> }) {
 	const notified: string[] = [];
+	const kinds: Array<string | undefined> = [];
 	const ctx = {
 		mode: "tui",
 		ui: {
-			notify(message: string, _kind?: string) {
+			notify(message: string, kind?: string) {
 				notified.push(message);
+				kinds.push(kind);
 			},
 			select: overrides?.select ?? (async () => undefined),
 		},
 	} as unknown as ExtensionCommandContext;
-	return { ctx, notified };
+	return { ctx, notified, kinds };
 }
 
 describe("/sudo subcommands (ADR 0034)", () => {
@@ -167,12 +169,18 @@ describe("/sudo subcommands (ADR 0034)", () => {
 	it("ttl <duration> persists the new default and re-times a live entry to match", async () => {
 		credentialCache.set("hunter2", 60_000);
 		const { ctx, notified } = fakeCtx();
+		const before = Date.now();
 		await def.handler("ttl 1h", ctx);
+		const after = Date.now();
 
 		expect(settingsStore.saved).toEqual([{ namespace: "archimedes.sudo", config: { ...DEFAULT_SUDO_CONFIG, ttlMs: 3_600_000 } }]);
+		// `expiresAt` is written DURING the await, between these two clock reads, so
+		// the window is exact and needs no tolerance — a `Date.now()` read after the
+		// await plus a small slack is what flakes on a loaded runner.
 		const entry = credentialCache.get();
 		expect(entry).not.toBeNull();
-		expect(entry!.expiresAt - Date.now()).toBeLessThanOrEqual(3_600_000);
+		expect(entry!.expiresAt).toBeGreaterThanOrEqual(before + 3_600_000);
+		expect(entry!.expiresAt).toBeLessThanOrEqual(after + 3_600_000);
 		expect(notified[0]).toContain("re-timed to match");
 	});
 
@@ -188,13 +196,17 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		settingsStore.settings["archimedes.sudo"] = { ttlMs: 7_200_000 };
 		credentialCache.set("hunter2", 7_200_000);
 		const { ctx, notified } = fakeCtx();
+		const before = Date.now();
 		await def.handler("ttl default", ctx);
+		const after = Date.now();
 
 		expect(settingsStore.saved[0]?.config).toMatchObject({ ttlMs: DEFAULT_SUDO_CONFIG.ttlMs });
 		expect(notified[0]).toContain("TTL reset to the default 15m");
+		// Bracket the write with two clock reads instead of racing one: the entry is
+		// re-timed DURING the await, so `expiresAt - ttl` lands in [before, after].
 		const entry = credentialCache.get();
-		expect(entry?.expiresAt).toBeGreaterThanOrEqual(Date.now() + DEFAULT_SUDO_CONFIG.ttlMs - 5);
-		expect(entry?.expiresAt).toBeLessThanOrEqual(Date.now() + DEFAULT_SUDO_CONFIG.ttlMs);
+		expect(entry?.expiresAt).toBeGreaterThanOrEqual(before + DEFAULT_SUDO_CONFIG.ttlMs);
+		expect(entry?.expiresAt).toBeLessThanOrEqual(after + DEFAULT_SUDO_CONFIG.ttlMs);
 	});
 
 	it("ttl with an unparseable argument is a usage error — nothing saved, cache untouched", async () => {
@@ -274,7 +286,12 @@ describe("/sudo subcommands (ADR 0034)", () => {
 			await def.handler("auth 2h", ctx);
 			expect(notified.join("\n")).not.toContain("hunter2");
 		}
-		expect(JSON.stringify(settingsStore.settings)).not.toContain("hunter2");
+		// `auth` never writes settings — `ttl` does — so the settings assertion has to
+		// walk the arm that actually persists, or it cannot fail.
+		const { ctx } = fakeCtx();
+		await def.handler("ttl 2h", ctx);
+		expect(settingsStore.saved).toHaveLength(1);
+		expect(JSON.stringify(settingsStore.saved)).not.toContain("hunter2");
 	});
 
 	it("passes the typed password and the probe timeout to the strict probe", async () => {
@@ -298,11 +315,17 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		// promptForPassword rejects outside TUI/bridge; uncaught, pi reports it as an
 		// extension error on `command:sudo` quoting sudo_exec — the wrong command.
 		promptState.reject = true;
-		const { ctx, notified } = fakeCtx();
+		const { ctx, notified, kinds } = fakeCtx();
 		await expect(def.handler("auth", ctx)).resolves.toBeUndefined();
 
 		expect(credentialCache.get()).toBeNull();
+		// Exactly one notify: `""` is promptForPassword's CANCELLATION sentinel, so
+		// returning it made the cancellation branch fire a second time and tell the
+		// user they cancelled a prompt they were never shown.
+		expect(notified).toHaveLength(1);
+		expect(kinds[0]).toBe("error");
 		expect(notified[0]).toContain("needs an interactive session");
+		expect(notified.join("\n")).not.toContain("Cancelled");
 		expect(notified.join("\n")).not.toContain("sudo_exec");
 	});
 
@@ -312,21 +335,42 @@ describe("/sudo subcommands (ADR 0034)", () => {
 		// Reviving would reopen the ADR 0033 gate without re-validating anything.
 		credentialCache.set("hunter2", 1);
 		await new Promise((r) => setTimeout(r, 5));
-		const { ctx, notified } = fakeCtx();
+		const { ctx, notified, kinds } = fakeCtx();
 		await def.handler("ttl 8h", ctx);
 
 		expect(settingsStore.saved).toHaveLength(1); // the default still persists
 		expect(credentialCache.get()).toBeNull(); // the window does not reopen
-		expect(notified[0]).toBe("Default TTL set to 8h."); // and no false "re-timed" claim
+		// ...and the user is told so: an expired entry and an empty cache must not
+		// print the same sentence, or `/sudo ttl 8h` after a lapse reads as success.
+		expect(notified[0]).toContain("Default TTL set to 8h");
+		expect(notified[0]).toContain("had expired");
+		expect(notified[0]).toContain("/sudo auth");
+		expect(kinds[0]).toBe("warning");
 	});
 
 	it("ttl default does not revive an expired entry either", async () => {
 		credentialCache.set("hunter2", 1);
 		await new Promise((r) => setTimeout(r, 5));
-		const { ctx, notified } = fakeCtx();
+		const { ctx, notified, kinds } = fakeCtx();
 		await def.handler("ttl default", ctx);
 
 		expect(credentialCache.get()).toBeNull();
-		expect(notified[0]).toBe("TTL reset to the default 15m.");
+		expect(notified[0]).toContain("had expired");
+		expect(kinds[0]).toBe("warning");
+	});
+
+	it("an expired entry and an empty cache do not print the same ttl message", async () => {
+		// The distinction the previous wording lost: both used to end at the bare
+		// "Default TTL set to 8h.", so a lapsed window looked like a fresh one.
+		const empty = fakeCtx();
+		await def.handler("ttl 8h", empty.ctx);
+		expect(empty.kinds[0]).toBe("info");
+		expect(empty.notified[0]).toBe("Default TTL set to 8h.");
+
+		credentialCache.set("hunter2", 1);
+		await new Promise((r) => setTimeout(r, 5));
+		const expired = fakeCtx();
+		await def.handler("ttl 8h", expired.ctx);
+		expect(expired.notified[0]).not.toBe(empty.notified[0]);
 	});
 });

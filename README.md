@@ -145,7 +145,7 @@ Bash and codemode tools gain [enhanced styling](packages/ui/README.md) with coll
 
 ## A little more care with root access.
 
-For tasks that need sudo, [sudo](packages/sudo/README.md) shows you the exact command and its reason before you enter your password in a masked prompt—not the chat. Credentials are cached in memory with an expiry, and `/sudo forget` clears them.
+For tasks that need sudo, [sudo](packages/sudo/README.md) shows you the exact command and its reason before you enter your password in a masked prompt—not the chat. `/sudo auth` pre-authorizes with a window you choose, `/sudo ttl` resizes it, `/sudo forget` clears it; credentials live in memory with an expiry, never on disk.
 
 ## Step away without losing track.
 
@@ -172,7 +172,7 @@ Only want the diffs or footer? Each component is available separately — see [C
 | `/agents` | Suite, subagent enabled | Browse, create, and edit custom subagent definitions in `.pi/agents/*.md`. |
 | `/todos` | Todo component | Refreshes the todo widget and reports its status. `/todos clear` clears the list. (The board's visibility is not a `/todos` toggle — see the [todo docs](packages/todo/README.md).) |
 | `/web`, `/web status` | Web component | Web search and content tools. `/web status` shows provider and cache usage. |
-| `/sudo`, `/sudo forget` | Sudo component | Inspect cached credential state; `forget` clears it. |
+| `/sudo [auth\|ttl\|forget]` | Sudo component | Inspect cached credential state; `auth` pre-authorizes now with an optional TTL, `ttl` shows/sets the default window, `forget` clears it. |
 | `/reload` | Pi | Applies plugin changes and settings read at startup. |
 
 ---
