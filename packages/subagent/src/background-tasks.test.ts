@@ -410,6 +410,84 @@ describe("public background-task protocol", () => {
     expect(changedState.state).toBe("starting");
   });
 
+  it("hands consumers a row they cannot write into", () => {
+    const run: LiveSubagentTask = {
+      id: "frozen:0",
+      agent: "reviewer",
+      task: "review",
+      state: "running",
+      startedAt: 1,
+      progress: progress({ output: "the answer", toolCalls: undefined, currentTool: undefined }),
+    };
+
+    const first = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    // pi.events hands this object to every listener by reference, so a consumer
+    // that normalises a field in place would poison the memo for the rest of
+    // the run. Freezing turns that consumer bug into a loud throw.
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.usage)).toBe(true);
+    expect(() => {
+      (first as { transcript?: string }).transcript = "POISONED";
+    }).toThrow();
+
+    const next = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(next).toBe(first);
+    expect(next.transcript).toContain("the answer");
+    expect(next.transcript).not.toContain("POISONED");
+  });
+
+  it("invalidates the memo when a tool call earlier in the list reports an error", () => {
+    const toolCalls = [
+      { name: "read", argsPreview: "one.ts", error: false },
+      { name: "write", argsPreview: "two.ts", error: false },
+    ];
+    const run: LiveSubagentTask = {
+      id: "midlist:0",
+      agent: "reviewer",
+      task: "review",
+      state: "running",
+      startedAt: 1,
+      progress: progress({ toolCalls, currentTool: undefined, currentToolArgs: undefined }),
+    };
+
+    const first = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    // toolCalls is one array handlers.ts mutates in place, so neither its
+    // identity nor its length moves here: the error count is what does.
+    toolCalls[0]!.error = true;
+    const flipped = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
+    expect(flipped).not.toBe(first);
+    expect(flipped.transcript).toContain("✗ read: one.ts");
+  });
+
+  it("never publishes a lone surrogate when a transcript is cut mid-emoji", () => {
+    const marker = "\n[transcript truncated]";
+    const cut = MAX_BACKGROUND_TRANSCRIPT - marker.length;
+    const run: LiveSubagentTask = {
+      id: "surrogate:0",
+      agent: "reviewer",
+      task: "review",
+      state: "running",
+      startedAt: 1,
+      // No tool rows, so the published transcript is exactly this output and
+      // the cut lands on the emoji's high surrogate.
+      progress: progress({
+        output: `${"a".repeat(cut - 1)}\u{1f600}${"z".repeat(64)}`,
+        toolCalls: undefined,
+        currentTool: undefined,
+        currentToolArgs: undefined,
+      }),
+    };
+
+    const transcript = backgroundTaskSnapshot("owner", [run]).tasks[0]!.transcript!;
+    // One shorter than the cap by design: the cut backs off a code unit.
+    expect(transcript).toHaveLength(MAX_BACKGROUND_TRANSCRIPT - 1);
+    expect(transcript.endsWith(marker)).toBe(true);
+    const body = transcript.slice(0, -marker.length);
+    const last = body.charCodeAt(body.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(body.endsWith("a")).toBe(true);
+  });
+
   it("bounds sanitizer input before processing very large output", () => {
     const replace = vi.spyOn(String.prototype, "replace");
     const run: LiveSubagentTask = {
@@ -424,8 +502,11 @@ describe("public background-task protocol", () => {
     let task: BackgroundTaskSnapshot["tasks"][number];
     try {
       task = backgroundTaskSnapshot("owner", [run]).tasks[0]!;
-      const largestScannedInput = Math.max(...replace.mock.instances.map((value) => String(value).length));
-      expect(largestScannedInput).toBeLessThanOrEqual(MAX_BACKGROUND_SANITIZE_SCAN);
+      const scanned = replace.mock.instances.map((value) => String(value).length);
+      // Math.max(...[]) is -Infinity and passes any <= bound: assert the
+      // sanitizer ran, then pin the cap instead of merely bounding it.
+      expect(scanned.length).toBeGreaterThan(0);
+      expect(Math.max(...scanned)).toBe(MAX_BACKGROUND_SANITIZE_SCAN);
     } finally {
       replace.mockRestore();
     }

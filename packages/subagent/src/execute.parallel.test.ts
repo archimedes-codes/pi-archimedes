@@ -89,3 +89,42 @@ describe("executeParallel bridge settlement", () => {
     expect(updates.at(-1)?.map((item) => item.status)).toEqual(["failed", "completed"]);
   });
 });
+
+describe("executeParallel bridge settlement gate", () => {
+  it("withholds a settled sibling whose outcome the compact renderer cannot draw", async () => {
+    const resolvers: Array<(result: SubagentResult) => void> = [];
+    dispatchViaBridge.mockImplementation(() => new Promise<SubagentResult>((resolve) => {
+      resolvers.push(resolve);
+    }));
+    const updates: SubagentProgress[][] = [];
+    const batch = executeParallel({
+      tasks: [
+        { agent: "first", agentConfig: undefined, task: "get cancelled", model: "test/model", activeModel: undefined, cwd: undefined },
+        { agent: "second", agentConfig: undefined, task: "finish later", model: "test/model", activeModel: undefined, cwd: undefined },
+      ],
+      signal: undefined,
+      events: { emit: () => {}, on: () => () => {} },
+      onUpdate: (progress) => updates.push(progress),
+    });
+
+    // A cancelled run completes with an `aborted` outcome and no error.
+    const aborted = bridgeResult("first", "get cancelled", "completed");
+    aborted.outcome = "aborted" as const;
+    aborted.progress = { ...aborted.progress!, outcome: "aborted" as const };
+    resolvers[0]!(aborted);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // renderCompactParallelProgress drops `outcome`, so publishing this shape
+    // mid-batch would draw "✓ Done" for a run that was cancelled on purpose.
+    expect(updates.at(-1)?.[0]?.status).toBe("running");
+    expect(updates.at(-1)?.[0]?.outcome).toBeUndefined();
+
+    resolvers[1]!(bridgeResult("second", "finish later", "completed"));
+    const results = await batch;
+    // The withheld slot is not lost: the authoritative outcome arrives with the
+    // batch results, which the renderer draws from once Promise.all settles.
+    expect(results[0]).toMatchObject({ outcome: "aborted" });
+    expect(updates.at(-1)?.[1]?.status).toBe("completed");
+  });
+});

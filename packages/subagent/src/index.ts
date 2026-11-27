@@ -65,9 +65,12 @@ export function registerSubagent(pi: ExtensionAPI): void {
         BACKGROUND_TASKS_CHANNEL,
         backgroundTaskSnapshot(sessionId, liveBackgroundTasks.values()),
       );
-    } catch {
-      // The protocol is optional display output. A broken listener must never
-      // affect a child run or extension lifecycle.
+    } catch (err) {
+      // The protocol is optional display output. The host wraps each listener
+      // in its own try/catch (core/events.ts), so a throw here is a stale handle
+      // (pi invalidates it on session replacement/reload) or our own serializer —
+      // record it rather than dropping it silently, as emitOn() does.
+      diag("subagent", `[archimedes:background-tasks] snapshot emit failed: ${describeError(err)}`);
     }
   };
 
@@ -102,9 +105,11 @@ export function registerSubagent(pi: ExtensionAPI): void {
       if (!isBackgroundTaskRequest(value) || value.sessionId !== backgroundSessionId) return;
       emitBackgroundSnapshot();
     });
-  } catch {
+  } catch (err) {
     // Older or partially disposed hosts may not provide a usable event bus.
-    // Dispatch still works without the display protocol.
+    // Dispatch still works without the display protocol, but the request
+    // channel will never answer — leave a line in the diagnostic log.
+    diag("subagent", `[archimedes:background-tasks] request listener failed: ${describeError(err)}`);
   }
 
   // Standalone installs register before session_start. The suite registers

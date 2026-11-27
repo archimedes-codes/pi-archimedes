@@ -225,9 +225,9 @@ export async function executeParallel(options: {
       // Bridge dispatches only publish their initial running placeholder.
       // Publish the authoritative result as soon as this task settles rather
       // than leaving its slot running until Promise.all waits for every peer.
-      // Fork runs may repeat their final streaming update here; that is safer
-      // than inventing a terminal state when a result has no progress.
-      if (result.progress) {
+      // Restricted to states the streaming renderer already draws: it drops
+      // `outcome`, so an aborted/truncated run published here reads "✓ Done".
+      if (result.progress && (result.progress.error || result.progress.outcome === "completed")) {
         latestProgress[index] = result.progress;
         options.onUpdate?.([...latestProgress]);
       }

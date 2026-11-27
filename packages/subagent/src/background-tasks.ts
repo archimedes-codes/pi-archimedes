@@ -66,11 +66,16 @@ export interface LiveSubagentTask {
   };
 }
 
+/** Characters of raw input a single sanitizer pass is allowed to scan. */
+function sanitizeScanLimit(outputLimit: number): number {
+  return Math.min(MAX_BACKGROUND_SANITIZE_SCAN, outputLimit * 2 + 256);
+}
+
 /** Remove terminal controls while retaining readable dialogue line breaks. */
 function withoutTerminalControls(value: string, outputLimit: number): string {
   // Sanitization is regex-heavy. Cap its input before any replacement so an
   // accumulated multi-megabyte output cannot be rescanned on every heartbeat.
-  const scanLimit = Math.min(MAX_BACKGROUND_SANITIZE_SCAN, outputLimit * 2 + 256);
+  const scanLimit = sanitizeScanLimit(outputLimit);
   return value.slice(0, scanLimit)
     // OSC, including hyperlinks and title changes.
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
@@ -100,13 +105,20 @@ function boundedText(value: string | undefined, limit: number): string | undefin
 
 function boundedTranscript(value: string | undefined, limit: number): string | undefined {
   const raw = value ?? "";
-  const scanLimit = Math.min(MAX_BACKGROUND_SANITIZE_SCAN, limit * 2 + 256);
+  const scanLimit = sanitizeScanLimit(limit);
   const inputWasClipped = raw.length > scanLimit;
   const text = withoutTerminalControls(raw, limit).trim();
   if (!text) return undefined;
   if (text.length <= limit && !inputWasClipped) return text;
   if (limit <= TRANSCRIPT_TRUNCATION_MARKER.length) return text.slice(0, limit);
-  return text.slice(0, limit - TRANSCRIPT_TRUNCATION_MARKER.length) + TRANSCRIPT_TRUNCATION_MARKER;
+  let cut = limit - TRANSCRIPT_TRUNCATION_MARKER.length;
+  // slice counts UTF-16 code units: back off one when the cut lands between a
+  // surrogate pair, so a lone surrogate never reaches a consumer.
+  if (cut > 0 && cut < text.length) {
+    const last = text.charCodeAt(cut - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  }
+  return text.slice(0, cut) + TRANSCRIPT_TRUNCATION_MARKER;
 }
 
 function transcriptFor(progress: SubagentProgress | undefined): string | undefined {
@@ -173,6 +185,9 @@ function backgroundTaskCacheKey(run: LiveSubagentTask): readonly unknown[] {
     progress?.output,
     progress?.toolCalls,
     progress?.toolCalls?.length,
+    // toolCalls is one array mutated in place, so identity never changes and
+    // length alone misses an error flip; this catches one anywhere in the list.
+    progress?.toolCalls?.reduce((sum, call) => sum + (call.error ? 1 : 0), 0),
     lastToolCall?.name,
     lastToolCall?.argsPreview,
     lastToolCall?.error,
@@ -200,6 +215,10 @@ export function toBackgroundTask(run: LiveSubagentTask): BackgroundTask {
     "Inspect the Archimedes subagent tool row for authoritative status.",
   );
   const usage = knownUsage(run.progress);
+  // Frozen for the same reason as the row below: `usage` is the one nested
+  // object in a published row, and Object.freeze is shallow. Built fresh here,
+  // so nothing else holds a reference to it.
+  if (usage) Object.freeze(usage);
   const fullTask = boundedText(run.progress?.task ?? run.task, MAX_BACKGROUND_TASK);
   const transcript = transcriptFor(run.progress);
   const taskResult: BackgroundTask = {
@@ -214,6 +233,10 @@ export function toBackgroundTask(run: LiveSubagentTask): BackgroundTask {
     ...(usage ? { usage, usagePartial: true as const } : {}),
     detail,
   };
+  // The published row IS this object: pi.events hands it out by reference, so
+  // a consumer writing to a field would poison the memo for every later
+  // snapshot. Freeze so that consumer bug throws instead of silently persisting.
+  Object.freeze(taskResult);
   run.snapshotCache = { key: cacheKey, task: taskResult };
   return taskResult;
 }
