@@ -105,14 +105,18 @@ When a new package is added under `packages/<name>/`, update **all** of these or
 - Always commit per logical unit — don't batch unrelated changes
 
 ### Reviewing a Contributor's PR (tone, not technique)
-This repo gets feature PRs from external contributors who are not paid to be here. The reviewer's job is to get the change in, in good shape, without making anyone regret the effort. Five rules, all learned the hard way on PR #170:
+This repo gets feature PRs from external contributors who are not paid to be here. The reviewer's job is to get the change in, in good shape, without making anyone regret the effort. Six rules, all learned the hard way on PR #170:
 
 - **Be happy they showed up.** Lead with what is good and be specific about it. A review that opens with a defect list reads as a reprimand even when every line is fair. Thanks at the end, once, unembellished.
 - **Reviewer self-corrections go on the thread they correct, not in the summary review.** A correction can be load-bearing (a suggestion the author is still holding). The summary review is the one artifact the author reads start to finish — filling it with the reviewer's own mistakes makes the author's PR the venue for the reviewer's self-review. If the review is more than ~20% about the reviewer, rewrite it.
 - **Never disclose an unexecuted intent to touch someone's branch.** "I was going to push fixes to your fork" is true and irrelevant; to a first-time contributor it reads as a threat. Say what you verified, not what you were about to do.
 - **The headline must match the payload.** "Nothing left from me" followed by three asks makes the whole review read as a pile-on. If there are asks, the headline says there are asks, and everything non-blocking is labelled so it can be skipped.
 - **A contributor's commit message or an out-of-scope finding is a thread or a card, never a public review bullet.** Filed-on-the-board is fine ("this is ours, not yours"); a public correction of their prose is not.
-- **Repair a comment by EDITING it — never by adding another one.** What is editable in place: an issue/PR comment (`PATCH /repos/{o}/{r}/issues/comments/{id}`, also `DELETE`) and a review thread comment (`PATCH /repos/{o}/{r}/pulls/comments/{id}`). What is **immutable** is a submitted review body: `PATCH …/pulls/{n}/reviews/{id}` → 404 (no route), `DELETE` → 422 (pending reviews only). So write the review once, correctly. If a tone mistake has already landed in an editable comment, edit that comment; if it landed in a submitted review, **say nothing further on the PR** — do not post a repair comment. A second notification about the reviewer's tone is worse than the first: it doubles the noise, it re-centres the reviewer in the author's thread, and the author has to read two comments to find one ask. Get it right before the submit button instead.
+- **Repair a comment by EDITING it — never by adding another one.** Everything the reviewer writes is editable in place, including a submitted review body:
+  - issue/PR comment — `PATCH` / `DELETE /repos/{o}/{r}/issues/comments/{id}`
+  - review thread comment — `PATCH` / `DELETE /repos/{o}/{r}/pulls/comments/{id}`
+  - **submitted review body — GraphQL only.** REST has no route (`PATCH …/pulls/{n}/reviews/{id}` → 404, `DELETE` → 422, pending reviews only), which reads as "immutable" and is **wrong**: the GraphQL mutation `updatePullRequestReview(input: {pullRequestReviewId, body})` edits it in place, keeps `state`, adds no review, and sends no new notification. Get the node id from `pullRequest(number:){reviews{nodes{id}}}` (the `PRR_…` global id, not the numeric one); the payload field is `pullRequestReview`, not `review`.
+  So: edit the comment that is wrong, delete the one that should not exist, and **never post a third thing about it.** A second notification about the reviewer's tone is worse than the first — it doubles the noise, re-centres the reviewer in the author's thread, and makes the author read two comments to find one ask.
 
 ### Documentation Structure
 Docs follow the skill-suite layout (`specify`/`finish` conventions):
