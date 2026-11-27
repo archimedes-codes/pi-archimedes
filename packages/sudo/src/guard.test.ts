@@ -445,10 +445,19 @@ describe("isInteractiveSudoAttempt — `<<-` heredoc bodies indented with tabs",
 		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tplain body\n\tEOF").blocked).toBe(false);
 	});
 
-	it("tokenizeCommand: leading tabs are stripped from the body, delimiter still closes", () => {
-		const segs = tokenizeCommand("cat <<-EOF\n\t\tFOO\n\tEOF\nbar");
-		const words = segs.flat().map((t) => t.text);
-		expect(words).toContain("FOO"); // indent stripped, body word intact
-		expect(words).toContain("bar"); // the heredoc closes, following text is parsed again
+	it("tokenizeCommand: indent stripped, `;` stays body data, delimiter still closes", () => {
+		// `;` is the lever: inside a heredoc body it is DATA, outside it is a segment
+		// boundary — so these assertions fail if the terminator stops closing. Plain
+		// body words (`FOO`, `bar`) survive a broken close and pin nothing.
+		const segs = tokenizeCommand("cat <<-EOF\n\t\tFOO; bar\n\tEOF\nbaz;qux");
+		expect(segs[1]?.map((t) => t.text)).toEqual(["FOO;", "bar"]); // indent stripped, `;` is data
+		expect(segs.at(-1)?.map((t) => t.text)).toEqual(["qux"]); // closed, so `;` splits again
+	});
+
+	it("tokenizeCommand: a tab after body content separates words, as in the plain branch", () => {
+		// Without the split, `sudo\tapt` is one token whose basename is not `sudo`:
+		// the same command spelled with `<<` is blocked and this one would not be.
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tsudo\tapt update\nEOF").blocked).toBe(true);
+		expect(tokenizeCommand("cat <<-EOF\n\tFOO\tbar\nEOF")[1]?.map((t) => t.text)).toEqual(["FOO", "bar"]);
 	});
 });
