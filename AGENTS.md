@@ -104,6 +104,15 @@ When a new package is added under `packages/<name>/`, update **all** of these or
 - `fix:` for bug fixes
 - Always commit per logical unit — don't batch unrelated changes
 
+### Reviewing a Contributor's PR (tone, not technique)
+This repo gets feature PRs from external contributors who are not paid to be here. The reviewer's job is to get the change in, in good shape, without making anyone regret the effort. Five rules, all learned the hard way on PR #170:
+
+- **Be happy they showed up.** Lead with what is good and be specific about it. A review that opens with a defect list reads as a reprimand even when every line is fair. Thanks at the end, once, unembellished.
+- **Reviewer self-corrections go on the thread they correct, not in the summary review.** A correction can be load-bearing (a suggestion the author is still holding). The summary review is the one artifact the author reads start to finish — filling it with the reviewer's own mistakes makes the author's PR the venue for the reviewer's self-review. If the review is more than ~20% about the reviewer, rewrite it.
+- **Never disclose an unexecuted intent to touch someone's branch.** "I was going to push fixes to your fork" is true and irrelevant; to a first-time contributor it reads as a threat. Say what you verified, not what you were about to do.
+- **The headline must match the payload.** "Nothing left from me" followed by three asks makes the whole review read as a pile-on. If there are asks, the headline says there are asks, and everything non-blocking is labelled so it can be skipped.
+- **A contributor's commit message or an out-of-scope finding is a thread or a card, never a public review bullet.** Filed-on-the-board is fine ("this is ours, not yours"); a public correction of their prose is not, and it cannot be edited away afterwards — GitHub has no edit or delete route for a submitted review body (`PATCH …/reviews/<id>` → 404, `DELETE` → 422). The repair, if one is needed, is a short follow-up that says the useful part again in the tone the first one lacked.
+
 ### Documentation Structure
 Docs follow the skill-suite layout (`specify`/`finish` conventions):
 - **Plans** live in `docs/roadmap/<feature>.md` (kebab-case, named for the outcome) with front-matter `status` (`considering` / `committed`) + `done-when`. Only *unfinished* plans live on disk — the doc is **deleted when the feature ships** (history lives in git; no plan index, no `done/` graveyard). Supersede: note it in the old doc's body, then delete it.
