@@ -1,6 +1,6 @@
 ---
 status: live
-last-verified: 2026-11-26
+last-verified: 2026-11-27
 verified-by: the background-task section was checked against `packages/subagent/src/background-tasks.ts`, the register-scoped lifecycle in `index.ts`, the host 1.4.0 `EventBus` declarations and implementation, and `background-tasks.test.ts` on 2026-11-26; the prior full feature verification remains the 2026-10-15 source and test pass described below. That pass read `packages/subagent/src/row-block.ts`, `compact.ts`, `expanded.ts`, `render.ts`, `tool-schema.ts`, `index.ts`, `spawn.ts`, `stream.ts`, `execute.ts`, `run-outcome.ts`, `usage.ts`, `agents.ts`, `agent-store.ts`, `local-config.ts`, `agent-panel.ts`, `dispatch.ts`, `format.ts`, and `types.ts` against pi 1.2.0, plus pi's shipped subagent example and accounting path. It ran 2504 tests across 148 files and type-checked all 13 workspace projects. Live dispatch is **reported by the PR author** for the background-task section on 2026-11-26 — two parallel Archimedes subagents publishing independent status, task, usage, and transcript rows to the Slate consumer on a real terminal under pi 1.6.0, clearing normally — and was not reproduced by this verification pass, so treat it as the author's claim rather than a checked fact. The declarations read here were the host 1.4.0 `EventBus` types this workspace pins. Per-row terminal rendering is still not covered by any test in this pass.
 ---
 
@@ -59,6 +59,8 @@ All limits are JavaScript character counts. A snapshot contains at most 64 tasks
 Live progress supplies public usage keys `input`, `output`, and `cost`. The snapshot marks them with `usagePartial: true` because `SubagentProgress` has no cache-read or cache-write counters. Terminal runs do not remain as history or accounting rows.
 
 The live map, current session ID, and request unsubscriber live in `registerSubagent()`'s registration closure. Every emit is guarded, so a consumer that throws cannot fail dispatch. Validation errors publish no task. Abort and `finally` paths remove the tool call's rows and publish the resulting snapshot.
+
+The row and its nested `usage` are `Object.freeze`d before they are memoised, because `pi.events` hands the emitted object to every listener by reference and the memo returns the same instance across heartbeats: a consumer writing to a field would otherwise poison the publisher's cache for the rest of the run. The published vocabulary is a contract another repo's code reads, so its fields are additive-only from here — `docs/decisions/0035-background-tasks-public-protocol.md`.
 
 ## The tool row is either a row or a block
 
