@@ -1,7 +1,7 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
-import { handleBashToolCall, isInteractiveSudoAttempt } from "./guard.js";
+import { handleBashToolCall, isInteractiveSudoAttempt, tokenizeCommand } from "./guard.js";
 
 // ── plan-030 Task 2: the 12 enumerated detection cases ─────────────────────
 
@@ -423,5 +423,41 @@ describe("isInteractiveSudoAttempt — header known-gaps, documented behavior pi
 		expect(isInteractiveSudoAttempt("exec -a sudo apt").blocked).toBe(false); // argv0 swap; runs `apt`
 		expect(isInteractiveSudoAttempt("xargs -e sudo cat").blocked).toBe(false); // the stopword IS `sudo`; runs `cat`
 		expect(isInteractiveSudoAttempt("env '\"sudo\" -n' true").blocked).toBe(false); // allow-direction of the quoted-cluster no-prompt lookahead (guard.ts ~411): `env '"sudo" apt'` is pinned blocked, this pins the allow side
+	});
+});
+
+// ── `<<-EOF` bodies indented with tabs used to spin forever ────────────────
+// The heredoc reader stripped leading tabs with a bare `continue`, skipping the
+// loop's only `i += 1` → the same tab was re-read endlessly. Because the guard
+// runs synchronously on the JS main thread, the hang took the whole pi session
+// with it: 100% CPU, no syscalls, and SIGINT/SIGTERM could not be serviced.
+describe("isInteractiveSudoAttempt — `<<-` heredoc bodies indented with tabs", () => {
+	it("terminates on a tab-indented `<<-EOF` body (hang regression)", () => {
+		const cmd = `cd /tmp && bash -c 'while IFS=$'\t' read -r a b; do printf "%s=%s\\n" "$a" "$b"; done <<-EOF\n\tA=1\tlabel\n\tB=2\tlabel\nEOF'`;
+		expect(isInteractiveSudoAttempt(cmd).blocked).toBe(false);
+	});
+
+	it("still blocks a `sudo` carried in a tab-indented `<<-EOF` body", () => {
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tsudo apt update\n\tEOF").blocked).toBe(true);
+	});
+
+	it("does not block a tab-indented body without sudo", () => {
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tplain body\n\tEOF").blocked).toBe(false);
+	});
+
+	it("tokenizeCommand: indent stripped, `;` stays body data, delimiter still closes", () => {
+		// `;` is the lever: inside a heredoc body it is DATA, outside it is a segment
+		// boundary — so these assertions fail if the terminator stops closing. Plain
+		// body words (`FOO`, `bar`) survive a broken close and pin nothing.
+		const segs = tokenizeCommand("cat <<-EOF\n\t\tFOO; bar\n\tEOF\nbaz;qux");
+		expect(segs[1]?.map((t) => t.text)).toEqual(["FOO;", "bar"]); // indent stripped, `;` is data
+		expect(segs.at(-1)?.map((t) => t.text)).toEqual(["qux"]); // closed, so `;` splits again
+	});
+
+	it("tokenizeCommand: a tab after body content separates words, as in the plain branch", () => {
+		// Without the split, `sudo\tapt` is one token whose basename is not `sudo`:
+		// the same command spelled with `<<` is blocked and this one would not be.
+		expect(isInteractiveSudoAttempt("cat <<-EOF\n\tsudo\tapt update\nEOF").blocked).toBe(true);
+		expect(tokenizeCommand("cat <<-EOF\n\tFOO\tbar\nEOF")[1]?.map((t) => t.text)).toEqual(["FOO", "bar"]);
 	});
 });

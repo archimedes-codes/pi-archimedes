@@ -27,6 +27,10 @@ jobs:
   # suite. Red here means our own tree stopped compiling or stopped working.
   typecheck:
     runs-on: ubuntu-latest
+    # A hang must go red, not burn the 360-minute default: the `<<-` heredoc
+    # tokenizer spin (fixed in #173) hangs the suite instead of failing it, and
+    # a re-introduced one would sit here for six hours looking like a slow queue.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +63,8 @@ jobs:
   pi-latest:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Same reason as the floor job, with slack for three installs/updates.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

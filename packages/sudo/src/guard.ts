@@ -547,6 +547,10 @@ export function tokenizeCommand(command: string): GuardToken[][] {
 			// first token is `#` (not `sudo`), so such lines are not blocked, matching
 			// how bash would treat them in an executing here-doc.
 			if (c === "\n") {
+				// This branch consumes every leading tab of a body line, so `heredoc.line`
+				// never starts with one here. The strip stays anyway: it is what would keep
+				// tab-indented terminators matching if someone later rewrites the tab arm
+				// below to stop consuming them, and it costs one regex per body line.
 				const check = heredoc.stripTabs ? heredoc.line.replace(/^\t+/, "") : heredoc.line;
 				if (check === heredoc.delimiter) {
 					heredoc.active = false;
@@ -559,10 +563,23 @@ export function tokenizeCommand(command: string): GuardToken[][] {
 					heredoc.line = "";
 				}
 			} else if (c === "\t" && heredoc.stripTabs) {
-				if (heredoc.line === "") continue; // leading tabs are stripped, not body content
+				// Leading tabs are stripped, not body content. The loop advances `i`
+				// once at the bottom, so this `continue` must step over the tab
+				// itself — otherwise the same character is re-read forever and a
+				// `<<-EOF` body indented with tabs hangs the tokenizer (and with it
+				// the session: the guard runs on the JS main thread, where no signal
+				// can interrupt it).
+				if (heredoc.line === "") {
+					i += 1;
+					continue;
+				}
+				// A tab AFTER body content is not body text: it separates words, exactly
+				// as in the plain `<<` branch below. Appending it to the open word instead
+				// would make `sudo\tapt` one token whose basename is not `sudo`, so the
+				// same command written with `<<` would be blocked and with `<<-` allowed —
+				// over-blocking is the safe direction, this is the unsafe one.
 				heredoc.line += c;
-				current += c;
-				haveWord = true;
+				flushWord();
 			} else {
 				heredoc.line += c;
 				if (c === " " || c === "\t") flushWord();
